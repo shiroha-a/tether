@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   api,
   formatBytes,
+  formatDuration,
   isShell,
   sessionLabel,
   shortPath,
@@ -12,6 +13,7 @@ import {
   type SystemInfo,
 } from "../api";
 import { loadPrefs } from "../prefs";
+import AboutDialog from "./AboutDialog";
 import UsageWidget from "./UsageWidget";
 
 interface Props {
@@ -58,6 +60,7 @@ export default function Home(props: Props) {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [busyDir, setBusyDir] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [aboutOpen, setAboutOpen] = useState(false);
   // 開いた時点の既読時刻で未読を判定し、表示したら既読にする
   const [seenAt] = useState(() => {
     try {
@@ -130,7 +133,12 @@ export default function Home(props: Props) {
   return (
     <div className="home">
       <div className="home-head">
-        <h1>ホーム</h1>
+        <div className="home-title">
+          <h1>ホーム</h1>
+          <button className="btn ghost small" onClick={() => setAboutOpen(true)}>
+            About tether
+          </button>
+        </div>
         <div className="home-head-actions">
           <button className="btn" onClick={() => onBrowse()}>
             フォルダを開く
@@ -141,6 +149,7 @@ export default function Home(props: Props) {
         </div>
       </div>
       {error && <p className="error">{error}</p>}
+      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
 
       {recentDirs.length > 0 && (
         <section className="home-section">
@@ -312,8 +321,6 @@ function Meter({ label, pct, detail }: { label: string; pct: number; detail: str
 }
 
 function SystemMeters({ s }: { s: SystemInfo }) {
-  const days = Math.floor(s.uptimeSec / 86400);
-  const hours = Math.floor((s.uptimeSec % 86400) / 3600);
   const memUsed = s.memTotal - s.memAvailable;
   const diskUsed = s.diskTotal - s.diskFree;
   return (
@@ -339,12 +346,7 @@ function SystemMeters({ s }: { s: SystemInfo }) {
           detail={`空き ${formatBytes(s.diskFree)}（${shortPath(s.diskPath)}）`}
         />
       )}
-      {s.uptimeSec > 0 && (
-        <p className="muted small uptime">
-          稼働 {days > 0 ? `${days}日` : ""}
-          {hours}時間
-        </p>
-      )}
+      {s.uptimeSec > 0 && <p className="muted small uptime">稼働 {formatDuration(s.uptimeSec)}</p>}
     </div>
   );
 }

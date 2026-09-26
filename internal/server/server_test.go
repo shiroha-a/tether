@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -60,9 +61,11 @@ func newEnv(t *testing.T) *env {
 			return p, ok
 		},
 		Root: root, Token: token, Sessions: m, Hub: hub,
-		Notifier:  &events.Notifier{Hub: hub, Sessions: m},
-		Scheduler: sched,
-		Usage:     &usage.Client{CredentialsPath: "/nonexistent", TTL: time.Minute},
+		Notifier:   &events.Notifier{Hub: hub, Sessions: m},
+		Scheduler:  sched,
+		Usage:      &usage.Client{CredentialsPath: "/nonexistent", TTL: time.Minute},
+		Version:    "v1.2.3-test",
+		Repository: "https://example.com/tether",
 		Static: fstest.MapFS{
 			"index.html":    {Data: []byte("<html>app</html>")},
 			"assets/app.js": {Data: []byte("js")},
@@ -337,6 +340,45 @@ func TestHomeEndpoints(t *testing.T) {
 	res = e.do(t, "GET", "/api/system", nil, true)
 	if err := json.NewDecoder(res.Body).Decode(&sys); err != nil || sys.CPUs < 1 || sys.MemTotal == 0 || sys.DiskPath != e.root {
 		t.Fatalf("system: %v %+v", err, sys)
+	}
+}
+
+func TestAboutEndpoint(t *testing.T) {
+	e := newEnv(t)
+	if res := e.do(t, "GET", "/api/about", nil, false); res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("about without token: %d", res.StatusCode)
+	}
+	var about struct {
+		Version    string    `json:"version"`
+		GoVersion  string    `json:"goVersion"`
+		Platform   string    `json:"platform"`
+		StartedAt  time.Time `json:"startedAt"`
+		Repository string    `json:"repository"`
+		License    string    `json:"license"`
+	}
+	res := e.do(t, "GET", "/api/about", nil, true)
+	if err := json.NewDecoder(res.Body).Decode(&about); err != nil || res.StatusCode != 200 {
+		t.Fatalf("about: %d %v", res.StatusCode, err)
+	}
+	want := runtime.GOOS + "/" + runtime.GOARCH
+	if about.Version != "v1.2.3-test" || about.GoVersion != runtime.Version() || about.Platform != want ||
+		about.Repository != "https://example.com/tether" || about.License != "MIT" {
+		t.Errorf("about = %+v", about)
+	}
+	if about.StartedAt.IsZero() || time.Since(about.StartedAt) > time.Minute {
+		t.Errorf("startedAt = %v", about.StartedAt)
+	}
+}
+
+func TestAboutVersionDefaultsToDev(t *testing.T) {
+	s := New(Deps{})
+	rec := httptest.NewRecorder()
+	s.about(rec, httptest.NewRequest("GET", "/api/about", nil))
+	var about struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&about); err != nil || about.Version != "dev" {
+		t.Errorf("version = %q (%v)", about.Version, err)
 	}
 }
 
