@@ -1608,6 +1608,180 @@ textarea {
 .about-link {
   text-decoration: none;
 }
+.remote {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  max-width: 860px;
+  padding: 20px 24px calc(24px + env(safe-area-inset-bottom));
+}
+.remote h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+.remote-section {
+  margin-top: 22px;
+}
+.remote-section h2 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.remote-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+.remote-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.remote-item.column {
+  flex-direction: column;
+  align-items: stretch;
+}
+.remote-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.remote-main .muted {
+  overflow-wrap: anywhere;
+}
+.remote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.remote-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.remote-form .mono,
+.pair-code .mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.remote-form .btn {
+  align-self: flex-start;
+}
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chips .chip {
+  cursor: default;
+  font-size: 11px;
+}
+.policy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.policy-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.policy-item input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+.pair-code {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+}
+.pair-code p {
+  margin: 0;
+}
+.pair-code code {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.audit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.audit-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.audit-list code {
+  min-width: 0;
+  font: 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.audit-list .failed strong {
+  color: var(--crit);
+}
+.audit-error {
+  color: var(--crit);
+  font-size: 12px;
+}
+.remote-note {
+  margin-top: 24px;
+}
+.approval p {
+  margin: 0 0 10px;
+}
+.approval-detail {
+  max-height: 40vh;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  font: 13px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-warn {
+  color: var(--warn);
+  font-size: 13px;
+}
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
 .form {
   display: flex;
   flex-direction: column;

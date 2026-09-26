@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -208,9 +207,4 @@ func (n *Notifier) postDiscord(note Notification) {
 	}
 }
 
-func label(sp session.Spec) string {
-	if sp.Label != "" {
-		return sp.Label
-	}
-	return filepath.Base(sp.Cwd)
-}
+func label(sp session.Spec) string { return session.DisplayLabel(sp) }

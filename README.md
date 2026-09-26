@@ -15,6 +15,7 @@ A self-hosted web app for running Claude Code from any browser — desktop, phon
 - **Files**: browse, upload, download, and create folders. Markdown, text, and images can be previewed.
 - **Notifications**: browser notifications, in-app toasts, and an optional Discord webhook when Claude finishes or needs a decision.
 - **Scheduled prompts**: send a prompt at a given time. A stopped session is resumed first.
+- **Linked machines**: link tether on other machines so Claude can check their status, read files, run commands or hand them a task, with your approval for each call (see [Linking machines](#linking-machines)).
 - **Mobile friendly**:
   - Helper key bar with ↑/↓/Enter always visible.
   - Composer for typing with the phone keyboard.
@@ -107,6 +108,34 @@ tailscale serve status
 - **URL**: `https://<machine>.<tailnet>.ts.net:3100`. Using a dedicated port keeps port 443 free for other services on the same machine; add them the same way, for example with `--https=8443`.
 - **Security checks still work**: requests through `tailscale serve` reach tether from localhost, and the `Host` header is preserved. The Host check, CSRF protection, and WebSocket origin checks work unchanged.
 
+## Linking machines
+
+Install tether on several machines (for example a desktop and a VPS) and link them. Claude Code sessions on one machine then get MCP tools to use the others: `remote_machines`, `remote_status`, `remote_list_files`, `remote_read_file`, `remote_exec`, `remote_delegate` and `remote_delegate_result`.
+
+**Pairing (once per pair)**
+
+1. On the machine to be used (B), open **マシンの連携** and create a connection for the other machine (A). Choose what A may do; a pairing code is shown once.
+2. On A, open **マシンの連携** and add B with that code. A checks the connection before saving it.
+3. Restart the Claude Code sessions on A that should use B. The tools are given to sessions started while at least one machine is linked.
+
+**Who decides what**
+
+- **B sets the limits** for each machine that uses it:
+  - Server status and files are allowed by default.
+  - Command execution and delegation are off by default.
+  - Files are limited to B's `TETHER_ROOT`. Paths outside it are rejected before touching the disk, so their existence is not revealed.
+  - Commands run without a terminal, with a timeout (60 s by default, 600 s at most), a 256 KB output cap and no tether settings in their environment. Leftover background processes are killed.
+  - Delegated tasks start a new Claude Code session on B. B chooses its permission mode, and `bypassPermissions` cannot be chosen.
+- **You approve each call on A**: tether shows a dialog in the screen you are using, and sends a notification. The approval comes through tether's own API, never through the MCP channel. Unanswered requests are denied after 5 minutes.
+  - Reads (status, files, delegated results) can be allowed for 15 minutes from the same session.
+  - Command execution and delegation are approved every time.
+- **B keeps a log** of every call from other machines, allowed or not. It is shown in **マシンの連携**. Deleting a connection on B revokes its token immediately.
+- Tool results tell Claude that data from another machine is untrusted and must not be followed as instructions.
+
+**Transport**: A calls B's `/peer/v1/*` endpoints with a per-link token, which B stores only as a hash. Use HTTPS (for example `tailscale serve`); plain `http://` is accepted only for `localhost`.
+
+**Limits of the approval**: with authentication off, tether trusts every process of your user on the same machine and every device on your tailnet (see [Security](#security)). Such a process, for example a command Claude runs with `curl`, can call the same API as the web UI, including the approval endpoint and B's own web API. The approval protects against Claude using the remote tools on its own, for example after a prompt injection. To separate machines strictly, set `TETHER_AUTH=on` on each of them.
+
 ## How it works
 
 ```
@@ -116,7 +145,7 @@ Browser (React + xterm.js)  --HTTP/WebSocket-->  tether (Go)
                                                    `- /internal/hook <-- `tether hook` (called by Claude Code hooks)
 ```
 
-- **Hooks**: Claude Code is started with `Stop`, `Notification`, `SessionStart`, and `UserPromptSubmit` hooks injected through `--settings`. Each hook runs the `tether hook` subcommand, which reports to the server with a random per-session key. Your `~/.claude/settings.json` is never modified.
+- **Hooks**: Claude Code is started with `Stop`, `Notification`, `SessionStart`, `UserPromptSubmit`, and `PreToolUse` hooks injected through `--settings`. Each hook runs the `tether hook` subcommand, which reports to the server with a random per-session key. Your `~/.claude/settings.json` is never modified.
 - **Session status**: hook events drive the status shown in the UI. A prompt means working, a permission prompt or dialog means waiting for a choice, and a finished response means done.
 - **Chat view**: the server reads Claude Code's transcript files (`~/.claude/projects/*/<session-id>.jsonl`) incrementally.
 - **Usage**: fetched from the same OAuth usage endpoint that Claude Code uses.

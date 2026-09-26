@@ -77,7 +77,7 @@ export interface ServerConfig {
 
 export interface Notice {
   type: "notify";
-  kind: "stop" | "attention" | "schedule";
+  kind: "stop" | "attention" | "schedule" | "remote";
   session: string;
   label: string;
   cwd: string;
@@ -142,6 +142,73 @@ export interface Snippet {
   label: string;
   command: string;
   createdAt: string;
+}
+
+/** What a linked machine allows (enforced by that machine). */
+export interface PeerPolicy {
+  status: boolean;
+  files: boolean;
+  exec: boolean;
+  delegate: boolean;
+  delegateMode?: string;
+}
+
+/** A machine this tether can use. */
+export interface RemoteMachine {
+  id: string;
+  name: string;
+  url: string;
+  policy: PeerPolicy;
+  createdAt: string;
+}
+
+/** A machine allowed to use this tether. */
+export interface PeerClient {
+  id: string;
+  name: string;
+  policy: PeerPolicy;
+  createdAt: string;
+  lastSeenAt?: string;
+}
+
+/** A request from a Claude Code session to use another machine. */
+export interface RemoteApproval {
+  id: string;
+  session: string;
+  sessionLabel: string;
+  machine: string;
+  op: string;
+  detail: string;
+  read: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** Read-only calls from a session to a machine allowed until expiresAt. */
+export interface RemoteGrant {
+  id: string;
+  session: string;
+  machine: string;
+  expiresAt: string;
+}
+
+export interface RemoteState {
+  remotes: RemoteMachine[];
+  clients: PeerClient[];
+  approvals: RemoteApproval[];
+  grants: RemoteGrant[];
+  delegateModes: string[];
+}
+
+/** One call made by another machine (the audit log). */
+export interface PeerAuditEntry {
+  at: string;
+  client: string;
+  op: string;
+  detail?: string;
+  ok: boolean;
+  error?: string;
+  durationMs: number;
 }
 
 /** Build and project information returned by GET /api/about. */
@@ -256,6 +323,19 @@ export const api = {
   notifications: () => request<Notice[]>("GET", "/api/notifications"),
   system: () => request<SystemInfo>("GET", "/api/system"),
   about: () => request<AboutInfo>("GET", "/api/about"),
+  remote: () => request<RemoteState>("GET", "/api/remote"),
+  addRemote: (name: string, code: string) => request<RemoteMachine>("POST", "/api/remote/remotes", { name, code }),
+  refreshRemote: (id: string) => request<RemoteMachine>("POST", `/api/remote/remotes/${q(id)}/refresh`),
+  deleteRemote: (id: string) => request<void>("DELETE", `/api/remote/remotes/${q(id)}`),
+  addPeerClient: (name: string, policy: PeerPolicy, url: string) =>
+    request<{ client: PeerClient; code: string }>("POST", "/api/remote/clients", { name, policy, url }),
+  setPeerPolicy: (id: string, policy: PeerPolicy) =>
+    request<PeerClient>("PUT", `/api/remote/clients/${q(id)}/policy`, policy),
+  deletePeerClient: (id: string) => request<void>("DELETE", `/api/remote/clients/${q(id)}`),
+  decideApproval: (id: string, allow: boolean, grantMinutes = 0) =>
+    request<void>("POST", `/api/remote/approvals/${q(id)}`, { allow, grantMinutes }),
+  revokeGrant: (id: string) => request<void>("DELETE", `/api/remote/grants/${q(id)}`),
+  peerAudit: () => request<PeerAuditEntry[]>("GET", "/api/remote/audit"),
   snippets: () => request<Snippet[]>("GET", "/api/snippets"),
   addSnippet: (label: string, command: string) => request<Snippet>("POST", "/api/snippets", { label, command }),
   updateSnippet: (id: string, label: string, command: string) =>

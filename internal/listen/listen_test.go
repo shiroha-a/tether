@@ -132,3 +132,17 @@ func TestTCPFallback(t *testing.T) {
 		t.Fatal("tcp addr reported as unix")
 	}
 }
+
+func TestEndpoint(t *testing.T) {
+	c, u := Endpoint("http://127.0.0.1:3100/internal/hook", "/internal/mcp")
+	if u != "http://127.0.0.1:3100/internal/mcp" || c != http.DefaultClient {
+		t.Fatalf("tcp endpoint = %q", u)
+	}
+	c, u = Endpoint("unix:/run/t.sock", "/internal/mcp")
+	if u != "http://localhost/internal/mcp" || c == http.DefaultClient {
+		t.Fatalf("unix endpoint = %q", u)
+	}
+	if _, u := HookClient("unix:/run/t.sock"); u != "http://localhost/internal/hook" {
+		t.Fatalf("hook url = %q", u)
+	}
+}

@@ -536,3 +536,69 @@ func TestLateWaitingNotification(t *testing.T) {
 		t.Fatalf("next prompt: set=%v activity=%q", set, activity())
 	}
 }
+
+func TestLauncherRemoteTools(t *testing.T) {
+	remote := false
+	l := &Launcher{
+		Bin: "/usr/bin/claude", HookExe: "/opt/tether", HookURL: "unix:/run/t.sock",
+		ClaudeConfigDir: t.TempDir(), Env: []string{"PATH=/bin"},
+		RemoteTools: func() bool { return remote },
+	}
+	sp := Spec{ID: "abc", ClaudeSessionID: "11111111-2222-4333-8444-555555555555", Cwd: "/tmp", HookKey: "k1"}
+	type settings struct {
+		Permissions *struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	parse := func(args []string) settings {
+		var s settings
+		if err := json.Unmarshal([]byte(args[slices.Index(args, "--settings")+1]), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// 接続先がなければMCPサーバも許可も渡さない
+	args := l.Command(sp).Args[1:]
+	if slices.Contains(args, "--mcp-config") || parse(args).Permissions != nil {
+		t.Fatalf("without remotes: %v", args)
+	}
+
+	remote = true
+	args = l.Command(sp).Args[1:]
+	i := slices.Index(args, "--mcp-config")
+	if i < 0 {
+		t.Fatalf("no --mcp-config: %v", args)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Type    string   `json:"type"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(args[i+1]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	srv := cfg.MCPServers[MCPServerName]
+	want := []string{"mcp", "--url", "unix:/run/t.sock", "--sid", "abc", "--key", "k1"}
+	if srv.Type != "stdio" || srv.Command != "/opt/tether" || !slices.Equal(srv.Args, want) {
+		t.Fatalf("mcp server = %+v", srv)
+	}
+	// tetherの画面で承認するので、Claude Code側の確認は出さない
+	if p := parse(args).Permissions; p == nil || !slices.Equal(p.Allow, []string{"mcp__tether-remote"}) {
+		t.Fatalf("permissions = %+v", p)
+	}
+	// シェルのセッションには関係ない
+	sh := l.Command(Spec{ID: "s", Kind: KindShell, Cwd: "/tmp"}).Args
+	if slices.Contains(sh, "--mcp-config") {
+		t.Fatalf("shell args = %v", sh)
+	}
+}
+
+func TestCleanEnv(t *testing.T) {
+	got := CleanEnv([]string{"PATH=/bin", "TETHER_TOKEN=x", "CLAUDECODE=1", "HOME=/h", "TERM=dumb"})
+	if !slices.Equal(got, []string{"PATH=/bin", "HOME=/h", "TERM=dumb"}) {
+		t.Fatalf("CleanEnv = %v", got)
+	}
+}

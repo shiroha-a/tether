@@ -78,18 +78,24 @@ func HookTarget(ln net.Listener) string {
 // HookClient returns an HTTP client and the request URL for a hook target
 // produced by HookTarget.
 func HookClient(target string) (*http.Client, string) {
-	path, ok := strings.CutPrefix(target, unixPrefix)
+	return Endpoint(target, "/internal/hook")
+}
+
+// Endpoint returns an HTTP client and the URL of path on the server reached
+// through a target produced by HookTarget.
+func Endpoint(target, path string) (*http.Client, string) {
+	sock, ok := strings.CutPrefix(target, unixPrefix)
 	if !ok {
-		return http.DefaultClient, target
+		return http.DefaultClient, strings.TrimSuffix(target, "/internal/hook") + path
 	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, "unix", path)
+			return d.DialContext(ctx, "unix", sock)
 		},
 	}
 	// ホスト名はUnixソケットでは使われないが、Hostヘッダ検証を通るようlocalhostにする
-	return &http.Client{Transport: tr}, "http://localhost/internal/hook"
+	return &http.Client{Transport: tr}, "http://localhost" + path
 }
 
 // IsUnix reports whether the connection was accepted on a Unix socket.

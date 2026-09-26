@@ -12,6 +12,7 @@ import {
   type Notice,
   type ServerConfig,
   type SessionStatus,
+  type RemoteApproval,
 } from "./api";
 import DirBrowser from "./components/DirBrowser";
 import Home from "./components/Home";
@@ -27,6 +28,8 @@ import UsageWidget from "./components/UsageWidget";
 import { notifyPermission, requestNotifyPermission, showSystemNotification } from "./notify";
 import { loadRecentDirs, rememberDir } from "./prefs";
 import { answeredChoices } from "./attention";
+import ApprovalDialog from "./components/ApprovalDialog";
+import RemoteView from "./components/RemoteView";
 
 type Phase = "loading" | "login" | "ready" | "error";
 
@@ -57,7 +60,7 @@ function readFontSize(): number {
   return window.innerWidth < 640 ? 12 : 14;
 }
 
-type View = "home" | "browser" | "session";
+type View = "home" | "browser" | "session" | "remote";
 
 /** Reads the current screen from the URL: /?session=<id>, /?browse=1 or / (home). */
 function parseLocation(): { view: View; session: string | null } {
@@ -65,6 +68,7 @@ function parseLocation(): { view: View; session: string | null } {
   const session = q.get("session");
   if (session) return { view: "session", session };
   if (q.get("browse")) return { view: "browser", session: null };
+  if (q.get("remote")) return { view: "remote", session: null };
   return { view: "home", session: null };
 }
 
@@ -73,6 +77,7 @@ function urlFor(view: View, session: string | null): string {
   url.search = "";
   if (view === "session" && session) url.searchParams.set("session", session);
   if (view === "browser") url.searchParams.set("browse", "1");
+  if (view === "remote") url.searchParams.set("remote", "1");
   return url.href;
 }
 
@@ -114,6 +119,9 @@ export default function App() {
   const [scheduleFor, setScheduleFor] = useState<string | null>(null);
   const [scheduleVersion, setScheduleVersion] = useState(0);
   const [snippetsVersion, setSnippetsVersion] = useState(0);
+  // 別のマシンとの連携（設定と承認待ち）
+  const [remoteVersion, setRemoteVersion] = useState(0);
+  const [approvals, setApprovals] = useState<RemoteApproval[]>([]);
   const [drawer, setDrawer] = useState(false);
   const [permission, setPermission] = useState(notifyPermission);
   const [menu, setMenu] = useState(false);
@@ -180,6 +188,7 @@ export default function App() {
         if (msg.type.startsWith("session.")) refreshSessions();
         if (msg.type === "schedule.changed") setScheduleVersion((v) => v + 1);
         if (msg.type === "snippets.changed") setSnippetsVersion((v) => v + 1);
+        if (msg.type === "remote.changed") setRemoteVersion((v) => v + 1);
         if (msg.type === "notify") {
           setNoticeVersion((v) => v + 1);
           const n = msg as Notice;
@@ -219,6 +228,15 @@ export default function App() {
     setActiveId(null);
   };
 
+  // 承認待ちは起動時と変化の通知のたびに取り直す（未対応のサーバでは何もしない）
+  useEffect(() => {
+    if (phase !== "ready") return;
+    api
+      .remote()
+      .then((st) => setApprovals(st.approvals))
+      .catch(() => setApprovals([]));
+  }, [phase, remoteVersion]);
+
   // 別の端末やターミナルで選択が済んだら、ホームや一覧の「入力待ち」の印を外す
   useEffect(() => {
     const done = answeredChoices(sessions, choiceNoticesRef.current);
@@ -253,6 +271,12 @@ export default function App() {
   const goHome = useCallback(() => {
     pushUrl("home", null);
     setView("home");
+    setDrawer(false);
+  }, []);
+
+  const openRemote = useCallback(() => {
+    pushUrl("remote", null);
+    setView("remote");
     setDrawer(false);
   }, []);
 
@@ -408,6 +432,12 @@ export default function App() {
             </span>
             フォルダ
           </button>
+          <button className={"side-nav-item" + (view === "remote" ? " on" : "")} onClick={openRemote}>
+            <span className="side-nav-icon" aria-hidden="true">
+              ⇄
+            </span>
+            マシンの連携
+          </button>
         </nav>
         <SessionList
           sessions={sessions}
@@ -533,6 +563,15 @@ export default function App() {
                 <span className="title-text">フォルダを選んで起動</span>
               </div>
             </>
+          ) : view === "remote" ? (
+            <>
+              <button className="icon-btn back" onClick={goHome} aria-label="ホームへ戻る" title="ホームへ戻る">
+                ←
+              </button>
+              <div className="title">
+                <span className="title-text">マシンの連携</span>
+              </div>
+            </>
           ) : (
             <div className="title">
               <span className="title-text">tether</span>
@@ -566,6 +605,8 @@ export default function App() {
             )
           ) : view === "browser" ? (
             <DirBrowser config={config} initialPath={browserPath} recentDirs={recentDirs} onLaunch={launch} />
+          ) : view === "remote" ? (
+            <RemoteView version={remoteVersion} />
           ) : (
             <Home
               sessions={sessions}
@@ -582,6 +623,8 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {approvals.length > 0 && <ApprovalDialog approval={approvals[0]} more={approvals.length - 1} />}
 
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
