@@ -8,6 +8,7 @@ import { bufferToText, copyText, decodeOsc52, readClipboard } from "../clipboard
 import { extractPaths, type KnownPath } from "../paths";
 import { usePathLookup } from "../hooks/usePathLookup";
 import CommandSheet from "./CommandSheet";
+import { attachTouchScroll, LineAccumulator } from "../touchScroll";
 
 type ConnState = "connecting" | "open" | "closed";
 
@@ -124,6 +125,21 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon((_e, uri) => openInNewTab(uri)));
     term.open(host);
+    // 指でのスクロール（xterm.js 6はタッチでスクロールできない）。
+    // 通常の画面は履歴をスクロールし、全画面のアプリ（less、vim等）ではホイールと同じく↑↓キーを送る
+    const touchLines = new LineAccumulator();
+    const detachTouch = attachTouchScroll(host, (px) => {
+      const screen = term.element?.querySelector(".xterm-screen");
+      const lines = touchLines.add(px, screen ? screen.clientHeight / term.rows : 0);
+      if (lines === 0) return;
+      if (term.buffer.active.type === "normal") {
+        term.scrollLines(lines);
+        return;
+      }
+      const app = term.modes.applicationCursorKeysMode;
+      const key = lines < 0 ? (app ? "\x1bOA" : "\x1b[A") : app ? "\x1bOB" : "\x1b[B";
+      input(key.repeat(Math.abs(lines)));
+    });
     termRef.current = term;
 
     // 行の文字列と、各文字が何番目のセルにあるか（全角は2セル）を作る
@@ -284,6 +300,7 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
       binSub.dispose();
       oscSub.dispose();
       linkSub.dispose();
+      detachTouch();
       window.clearTimeout(pathScan);
       wsRef.current?.close();
       wsRef.current = null;
