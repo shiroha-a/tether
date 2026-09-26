@@ -37,6 +37,7 @@ const MAX_CONTEXT = 8;
 const CONTEXT_SEARCH = 30;
 
 const indentOf = (s: string) => s.length - s.trimStart().length;
+const isSelectedLine = (l: string) => l.trimStart().startsWith(MARKER);
 
 // 直前の行が画面の右端からこの文字数以内まで埋まっていれば、次の行は折り返しの続きとみなす
 const WRAP_MARGIN = 10;
@@ -66,11 +67,22 @@ export function parseMenu(screen: string[], cols?: number): Menu | null {
   // フッター（なければ画面末尾）の直上から、空行・区切り線までを1つのまとまりとして取る
   let bottom = footer >= 0 ? footer : end;
   while (bottom > 0 && lines[bottom - 1] === "") bottom--;
-  let top = bottom;
-  while (top > 0 && lines[top - 1] !== "" && !DIVIDER.test(lines[top - 1])) top--;
-  const block = lines.slice(top, bottom);
+  const blockTop = (from: number) => {
+    let t = from;
+    while (t > 0 && lines[t - 1] !== "" && !DIVIDER.test(lines[t - 1])) t--;
+    return t;
+  };
+  let top = blockTop(bottom);
+  let block = lines.slice(top, bottom);
+  // AskUserQuestionでは「Chat about this」等の選択肢が区切り線の下に分かれて出る。
+  // 下のまとまりにカーソルがなく、すぐ上が区切り線なら、その上のまとまりとつなげて1つのメニューとして読む
+  if (!block.some(isSelectedLine) && top > 0 && lines[top - 1] !== "" && DIVIDER.test(lines[top - 1])) {
+    const upper = blockTop(top - 1);
+    block = [...lines.slice(upper, top - 1), ...block];
+    top = upper;
+  }
 
-  const selectedAt = block.findIndex((l) => l.trimStart().startsWith(MARKER));
+  const selectedAt = block.findIndex(isSelectedLine);
   if (selectedAt < 0) return null;
   const sel = block[selectedAt];
   // 選択肢の文字が始まる列（「❯ 」の直後）。ほかの選択肢もこの列から始まる
@@ -110,7 +122,11 @@ export function parseMenu(screen: string[], cols?: number): Menu | null {
   );
   // フッターがない場合は、入力欄の「❯」等の誤検出を避けるため番号付きのメニューだけを認める
   if (footer < 0 && !numbered) return null;
-  return { question: question.join(" ").trim(), context: contextAbove(lines, top), options };
+  const context = contextAbove(lines, top);
+  let q = question.join(" ").trim();
+  // 質問文が空行で選択肢から離れている画面（AskUserQuestion、信頼確認等）では、枠内の最後の行が質問にあたる
+  if (!q && context.length > 0 && context[context.length - 1] !== "…") q = context.pop()!.trim();
+  return { question: q, context: dedent(context), options };
 }
 
 /**
@@ -123,15 +139,19 @@ function contextAbove(lines: string[], top: number): string[] {
   for (let i = top - 1; i >= Math.max(0, top - CONTEXT_SEARCH); i--) {
     const line = lines[i];
     if (BORDER.test(line)) {
-      const body = found.reverse();
-      const indent = Math.min(...body.map(indentOf));
-      const out = body.map((l) => l.slice(indent));
+      const out = dedent(found.reverse());
       return out.length > MAX_CONTEXT ? [...out.slice(0, MAX_CONTEXT - 1), "…"] : out;
     }
     // 空行と、差分の区切り（╌）などの罫線だけの行は飛ばす
     if (line !== "" && !DIVIDER.test(line)) found.push(line);
   }
   return [];
+}
+
+/** Removes the indentation shared by all lines, keeping relative indentation. */
+function dedent(lines: string[]): string[] {
+  const indent = Math.min(...lines.map(indentOf));
+  return lines.map((l) => l.slice(indent));
 }
 
 /** Reads the menu and whether Claude Code is busy from the visible screen. */
