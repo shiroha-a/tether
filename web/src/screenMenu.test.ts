@@ -5,10 +5,13 @@ import permissionScreen from "./testdata/permission-prompt.txt?raw";
 // Bashの許可確認と、許可したあとコマンドを実行している最中の画面（v2.1.280、幅84）
 import bashScreen from "./testdata/bash-permission.txt?raw";
 import runningScreen from "./testdata/bash-running.txt?raw";
+// AskUserQuestion（v2.1.280、幅120）。「Chat about this」は区切り線の下に分かれて出る
+import askScreen from "./testdata/ask-user-question.txt?raw";
 
 const permission = permissionScreen.split("\n");
 const bash = bashScreen.split("\n");
 const running = runningScreen.split("\n");
+const ask = askScreen.split("\n");
 
 describe("parseMenu", () => {
   it("reads the real permission prompt", () => {
@@ -85,6 +88,54 @@ describe("parseMenu", () => {
     expect(parseMenu(far)!.context).toEqual([]);
   });
 
+  it("reads a real AskUserQuestion menu split by a divider", () => {
+    const menu = parseMenu(ask, 120)!;
+    expect(menu).not.toBeNull();
+    expect(menu.question).toBe("Which color do you like?");
+    expect(menu.context).toEqual(["☐ Color"]);
+    expect(menu.options.map((o) => [o.label, o.detail, o.selected])).toEqual([
+      ["Red", "warm color", true],
+      ["Blue", "cool color", false],
+      ["Green", "natural color", false],
+      ["Type something.", "", false],
+      ["Chat about this", "", false],
+    ]);
+    // 区切り線の下の選択肢も、↓で続けて移動できる位置として数える
+    expect(keysToChoose(menu, 4)).toEqual(["down", "down", "down", "down", "enter"]);
+  });
+
+  it("only joins blocks across a divider when the lower block has no cursor", () => {
+    // カーソルは下のまとまりにあるので、区切り線の上の出力（別の内容）は選択肢に混ぜない
+    const screen = [
+      " some earlier output",
+      " more output",
+      "──────────",
+      " Go?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel",
+    ];
+    const menu = parseMenu(screen)!;
+    expect(menu.question).toBe("Go?");
+    expect(menu.options.map((o) => o.label)).toEqual(["Yes", "No"]);
+    // 空行は区切り線ではないので、空行の上にある番号付きの行とはつなげない
+    expect(parseMenu([" ❯ 1. A", "   2. B", "", "   3. C", " Esc to cancel"])).toBeNull();
+  });
+
+  it("does not use a truncated context line as the question", () => {
+    const long = [
+      "────────────",
+      ...Array.from({ length: 12 }, (_, i) => ` line ${i}`),
+      "",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel",
+    ];
+    const menu = parseMenu(long)!;
+    expect(menu.question).toBe("");
+    expect(menu.context[7]).toBe("…");
+  });
+
   it("follows the cursor when another option is selected", () => {
     const screen = [
       " Do you want to proceed?",
@@ -109,10 +160,11 @@ describe("parseMenu", () => {
       "",
       " Enter to confirm · Esc to cancel",
     ];
-    // 質問文は空行で区切られていて別のまとまりなので、質問は空になり、選択肢だけを読む
+    // 質問文は空行で選択肢から離れているが、枠の中の最後の行として質問に使う
     const menu = parseMenu(screen)!;
     expect(menu.options.map((o) => o.label)).toEqual(["Yes, I trust this folder", "No, exit"]);
-    expect(menu.question).toBe("");
+    expect(menu.question).toBe("Quick safety check: Is this a project you created or one you trust?");
+    expect(menu.context).toEqual([]);
   });
 
   it("keeps option descriptions (AskUserQuestion style)", () => {
