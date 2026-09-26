@@ -2,12 +2,14 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +40,9 @@ type Server struct {
 	transcripts  func(claudeSessionID string) (string, bool)
 	startupDelay time.Duration
 	enterDelay   time.Duration
+	version      string
+	repository   string
+	startedAt    time.Time
 }
 
 // Deps are the components the server needs.
@@ -58,6 +63,10 @@ type Deps struct {
 	// StartupDelay is how long to wait after resuming a stopped session before
 	// sending input (Claude Code drops keystrokes while its TUI starts).
 	StartupDelay time.Duration
+	// Version is the build version shown in the about dialog; empty means "dev".
+	Version string
+	// Repository is the source repository URL shown in the about dialog.
+	Repository string
 }
 
 // New builds a server.
@@ -66,6 +75,7 @@ func New(d Deps) *Server {
 		root: d.Root, token: d.Token, sessions: d.Sessions, hub: d.Hub, notifier: d.Notifier,
 		scheduler: d.Scheduler, usage: d.Usage, static: d.Static, hosts: d.Hosts,
 		transcripts: d.Transcripts, startupDelay: d.StartupDelay, enterDelay: 300 * time.Millisecond,
+		version: cmp.Or(d.Version, "dev"), repository: d.Repository, startedAt: time.Now(),
 	}
 }
 
@@ -74,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	api := http.NewServeMux()
 	(&fsapi.Handler{Root: s.root}).Register(api)
 	api.HandleFunc("GET /api/config", s.config)
+	api.HandleFunc("GET /api/about", s.about)
 	api.HandleFunc("GET /api/sessions", s.listSessions)
 	api.HandleFunc("POST /api/sessions", s.createSession)
 	api.HandleFunc("PATCH /api/sessions/{id}", s.updateSession)
@@ -180,6 +191,17 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"root":            s.root,
 		"permissionModes": session.PermissionModes,
 		"models":          []string{"", "opus", "sonnet", "haiku"},
+	})
+}
+
+func (s *Server) about(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":    s.version,
+		"goVersion":  runtime.Version(),
+		"platform":   runtime.GOOS + "/" + runtime.GOARCH,
+		"startedAt":  s.startedAt,
+		"repository": s.repository,
+		"license":    "MIT",
 	})
 }
 

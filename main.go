@@ -34,6 +34,9 @@ import (
 
 var version = "dev"
 
+// repository is the public source repository shown in the about dialog.
+const repository = "https://github.com/shiroha-a/tether"
+
 func main() {
 	cmd := "serve"
 	if len(os.Args) > 1 {
@@ -148,6 +151,8 @@ func serve() error {
 			Hosts:        hosts,
 			Transcripts:  launcher.TranscriptPath,
 			StartupDelay: 8 * time.Second,
+			Version:      version,
+			Repository:   repository,
 		}).Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

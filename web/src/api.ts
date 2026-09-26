@@ -136,6 +136,16 @@ export interface SystemInfo {
   uptimeSec: number;
 }
 
+/** Build and project information returned by GET /api/about. */
+export interface AboutInfo {
+  version: string;
+  goVersion: string;
+  platform: string;
+  startedAt: string;
+  repository: string;
+  license: string;
+}
+
 const TOKEN_KEY = "tether.token";
 
 /** Returns the saved API token ("" when none). */
@@ -237,6 +247,7 @@ export const api = {
   sendKeys: (id: string, keys: InputKey[]) => request<void>("POST", `/api/sessions/${q(id)}/input`, { keys }),
   notifications: () => request<Notice[]>("GET", "/api/notifications"),
   system: () => request<SystemInfo>("GET", "/api/system"),
+  about: () => request<AboutInfo>("GET", "/api/about"),
   usage: (force = false) => request<Usage>("GET", `/api/usage${force ? "?force=1" : ""}`),
   schedules: (session: string) => request<ScheduleItem[]>("GET", `/api/schedules?session=${q(session)}`),
   addSchedule: (sessionId: string, prompt: string, runAt: Date) =>
@@ -265,6 +276,17 @@ export function formatBytes(n: number): string {
     i++;
   }
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+/** Japanese duration such as "3日4時間", "5時間12分" or "12分". */
+export function formatDuration(sec: number): string {
+  const s = Number.isFinite(sec) ? Math.max(0, Math.floor(sec)) : 0;
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days}日${hours}時間`;
+  if (hours > 0) return `${hours}時間${minutes}分`;
+  return `${minutes}分`;
 }
 
 /** Japanese relative time such as "3分前". */
