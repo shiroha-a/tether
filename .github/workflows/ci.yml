@@ -75,7 +75,9 @@ jobs:
       - name: Smoke test
         run: |
           mkdir -p "$RUNNER_TEMP/data"
-          TETHER_ADDR=127.0.0.1:3199 TETHER_DATA_DIR="$RUNNER_TEMP/data" ./bin/tether serve > "$RUNNER_TEMP/server.log" 2>&1 &
+          # 起動時にclaudeの場所を確かめるが、CIにはないので必ずある実行ファイルを渡す（セッションは起動しない）
+          TETHER_ADDR=127.0.0.1:3199 TETHER_DATA_DIR="$RUNNER_TEMP/data" TETHER_CLAUDE_BIN=/bin/true \
+            ./bin/tether serve > "$RUNNER_TEMP/server.log" 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           for _ in $(seq 1 50); do curl -sf http://127.0.0.1:3199/api/health >/dev/null && break; sleep 0.2; done
