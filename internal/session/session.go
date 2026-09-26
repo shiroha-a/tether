@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,6 +100,14 @@ type Session struct {
 
 func newSession(spec Spec) *Session {
 	return &Session{spec: spec, clients: map[*Client]struct{}{}, out: newRing(ringSize)}
+}
+
+// DisplayLabel is the session's name for people: its label, or the folder name.
+func DisplayLabel(sp Spec) string {
+	if sp.Label != "" {
+		return sp.Label
+	}
+	return filepath.Base(sp.Cwd)
 }
 
 // Spec returns a copy of the persisted description.

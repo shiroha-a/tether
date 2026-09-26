@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"tether/internal/guard"
 	"tether/internal/listen"
 	"tether/internal/netallow"
+	"tether/internal/peer"
 	"tether/internal/schedule"
 	"tether/internal/server"
 	"tether/internal/session"
@@ -50,10 +52,14 @@ func main() {
 		}
 	case "hook":
 		hook(os.Args[2:])
+	case "mcp":
+		if err := mcpServe(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	case "version", "--version", "-v":
 		fmt.Println("tether", version)
 	default:
-		fmt.Fprintf(os.Stderr, "usage: tether [serve|hook|version]\n")
+		fmt.Fprintf(os.Stderr, "usage: tether [serve|hook|mcp|version]\n")
 		os.Exit(2)
 	}
 }
@@ -111,20 +117,41 @@ func serve() error {
 		return err
 	}
 
+	peers, err := peer.NewStore(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	peerAudit, err := peer.NewAudit(cfg.DataDir, 10000)
+	if err != nil {
+		return err
+	}
 	launcher := &session.Launcher{
 		Bin:             claudeBin,
 		HookExe:         exe,
 		HookURL:         listen.HookTarget(ln),
 		ClaudeConfigDir: claudeDir,
 		Shell:           os.Getenv("SHELL"),
+		// 接続先が登録されているときだけ、Claude Codeにリモート連携のツールを渡す
+		RemoteTools: func() bool { return len(peers.Remotes()) > 0 },
 	}
 	hub := events.NewHub()
 	sessions, err := session.NewManager(cfg.DataDir, launcher.Command, cfg.IdleTimeout)
 	if err != nil {
 		return err
 	}
-	sessions.OnEvent = func(e session.Event) { hub.Publish(e) }
 	notifier := &events.Notifier{Hub: hub, Sessions: sessions, Discord: cfg.DiscordWebhook, Debounce: 10 * time.Second}
+	broker := peer.NewBroker(5 * time.Minute)
+	broker.OnChange = func() { hub.Publish(map[string]any{"type": "remote.changed"}) }
+	broker.OnRequest = func(a peer.Approval) {
+		notifier.Send(events.Notification{Kind: "remote", Session: a.Session, Label: a.SessionLabel, Message: fmt.Sprintf("%sでの%sの承認を待っています", a.Machine, peer.OpLabel(a.Op))})
+	}
+	sessions.OnEvent = func(e session.Event) {
+		hub.Publish(e)
+		// 止めた・消したセッションの「まとめて許可」は残さない
+		if e.Type == "session.exited" || e.Type == "session.deleted" {
+			broker.DropSession(e.Session)
+		}
+	}
 
 	sched, err := schedule.New(cfg.DataDir, scheduleTarget{sessions})
 	if err != nil {
@@ -158,6 +185,10 @@ func serve() error {
 			StartupDelay: 8 * time.Second,
 			Version:      version,
 			Repository:   repository,
+			Peers:        peers,
+			PeerAudit:    peerAudit,
+			Broker:       broker,
+			Shell:        os.Getenv("SHELL"),
 		}).Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -222,4 +253,65 @@ func (t scheduleTarget) Write(id string, p []byte) error {
 		return err
 	}
 	return s.Write(p)
+}
+
+// mcpServe runs the tether-remote MCP server over stdio for one Claude Code
+// session. It forwards tools/list and tools/call to the tether server, which
+// asks the user for approval before contacting another machine.
+func mcpServe(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	u := fs.String("url", "", "tether endpoint (same as hook --url)")
+	sid := fs.String("sid", "", "tether session id")
+	key := fs.String("key", "", "session key")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *u == "" || *sid == "" || *key == "" {
+		return errors.New("usage: tether mcp --url <endpoint> --sid <session> --key <key>")
+	}
+	client, endpoint := listen.Endpoint(*u, "/internal/mcp")
+	endpoint += "?" + url.Values{"sid": {*sid}, "key": {*key}}.Encode()
+	return peer.ServeMCP(context.Background(), os.Stdin, os.Stdout, &mcpBackend{client: client, endpoint: endpoint}, version)
+}
+
+// mcpBackend forwards MCP calls to the tether server.
+type mcpBackend struct {
+	client   *http.Client
+	endpoint string
+}
+
+func (b *mcpBackend) post(ctx context.Context, body, out any) error {
+	data, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1000))
+		return fmt.Errorf("tether returned %d: %s", res.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return json.NewDecoder(res.Body).Decode(out)
+}
+
+func (b *mcpBackend) ListTools(ctx context.Context) ([]peer.Tool, error) {
+	var v struct {
+		Tools []peer.Tool `json:"tools"`
+	}
+	err := b.post(ctx, map[string]any{"method": "tools/list"}, &v)
+	return v.Tools, err
+}
+
+func (b *mcpBackend) CallTool(ctx context.Context, name string, args json.RawMessage) (peer.ToolResult, error) {
+	var v struct {
+		Text    string `json:"text"`
+		IsError bool   `json:"isError"`
+	}
+	err := b.post(ctx, map[string]any{"method": "tools/call", "name": name, "arguments": args}, &v)
+	return peer.ToolResult{Text: v.Text, IsError: v.IsError}, err
 }

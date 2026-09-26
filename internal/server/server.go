@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"path"
 	"runtime"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"tether/internal/events"
 	"tether/internal/fsapi"
 	"tether/internal/guard"
+	"tether/internal/peer"
 	"tether/internal/schedule"
 	"tether/internal/session"
 	"tether/internal/snippets"
@@ -46,6 +48,13 @@ type Server struct {
 	version      string
 	repository   string
 	startedAt    time.Time
+	// リモート連携（nilなら無効）
+	peers        *peer.Store
+	broker       *peer.Broker
+	peerCaller   *peer.Caller
+	peerTools    *peer.Tools
+	peerService  *peer.Service
+	peerAuditLog *peer.Audit
 }
 
 // Deps are the components the server needs.
@@ -72,16 +81,36 @@ type Deps struct {
 	Version string
 	// Repository is the source repository URL shown in the about dialog.
 	Repository string
+	// Peers enables linking with tether on other machines; nil disables it.
+	Peers *peer.Store
+	// PeerAudit records calls from other machines (required with Peers).
+	PeerAudit *peer.Audit
+	// Broker holds approvals for calls to other machines (required with Peers).
+	Broker *peer.Broker
+	// Shell runs commands requested by other machines.
+	Shell string
 }
 
 // New builds a server.
 func New(d Deps) *Server {
-	return &Server{
+	s := &Server{
 		root: d.Root, token: d.Token, sessions: d.Sessions, hub: d.Hub, notifier: d.Notifier,
 		scheduler: d.Scheduler, snippets: d.Snippets, usage: d.Usage, static: d.Static, hosts: d.Hosts,
 		transcripts: d.Transcripts, startupDelay: d.StartupDelay, enterDelay: 300 * time.Millisecond,
 		version: cmp.Or(d.Version, "dev"), repository: d.Repository, startedAt: time.Now(),
 	}
+	if d.Peers != nil {
+		s.peers, s.broker, s.peerAuditLog = d.Peers, d.Broker, d.PeerAudit
+		s.peerCaller = &peer.Caller{}
+		s.peerTools = &peer.Tools{Store: d.Peers, Broker: d.Broker, Caller: s.peerCaller}
+		s.peerService = &peer.Service{
+			Store: d.Peers, Audit: d.PeerAudit, Root: d.Root, Version: s.version, Shell: d.Shell,
+			Env:       session.CleanEnv(os.Environ()),
+			Status:    func() any { return (&sysinfo.Reader{ProcDir: "/proc", DiskPath: d.Root}).Read() },
+			Delegator: delegator{s},
+		}
+	}
+	return s
 }
 
 // Handler returns the root HTTP handler.
@@ -106,6 +135,18 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("PATCH /api/snippets/{id}", s.updateSnippet)
 		api.HandleFunc("DELETE /api/snippets/{id}", s.deleteSnippet)
 	}
+	if s.peers != nil {
+		api.HandleFunc("GET /api/remote", s.remoteState)
+		api.HandleFunc("POST /api/remote/remotes", s.addRemote)
+		api.HandleFunc("POST /api/remote/remotes/{id}/refresh", s.refreshRemote)
+		api.HandleFunc("DELETE /api/remote/remotes/{id}", s.deleteRemote)
+		api.HandleFunc("POST /api/remote/clients", s.addClient)
+		api.HandleFunc("PUT /api/remote/clients/{id}/policy", s.setClientPolicy)
+		api.HandleFunc("DELETE /api/remote/clients/{id}", s.deleteClient)
+		api.HandleFunc("POST /api/remote/approvals/{id}", s.decideApproval)
+		api.HandleFunc("DELETE /api/remote/grants/{id}", s.revokeGrant)
+		api.HandleFunc("GET /api/remote/audit", s.peerAudit)
+	}
 	api.HandleFunc("GET /api/usage", s.usage.Handler)
 	api.HandleFunc("GET /api/notifications", s.notifier.HandleRecent)
 	api.HandleFunc("GET /api/system", (&sysinfo.Reader{ProcDir: "/proc", DiskPath: s.root}).Handler)
@@ -119,6 +160,12 @@ func (s *Server) Handler() http.Handler {
 	})
 	// hookはセッションごとのキーで認証するので、TETHER_TOKENの認証は通さない
 	root.HandleFunc("POST /internal/hook", s.notifier.HandleHook)
+	if s.peers != nil {
+		// 他のマシンからの呼び出しは、画面の認証ではなく接続元ごとのトークンで認証する
+		root.Handle("/peer/", s.peerService.Handler())
+		// MCPはhookと同じく、セッションごとのキーで認証する
+		root.HandleFunc("POST /internal/mcp", s.mcp)
+	}
 	protected := auth.Middleware(s.token, api)
 	root.Handle("/api/", protected)
 	root.Handle("/ws/", protected)

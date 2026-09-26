@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -23,6 +25,7 @@ import (
 	"tether/internal/events"
 	"tether/internal/guard"
 	"tether/internal/listen"
+	"tether/internal/peer"
 	"tether/internal/schedule"
 	"tether/internal/session"
 	"tether/internal/snippets"
@@ -36,6 +39,8 @@ type env struct {
 	root string
 	m    *session.Manager
 	hub  *events.Hub
+	// broker holds approvals for calls to other machines.
+	broker *peer.Broker
 	// transcripts maps claude session ids to transcript files for the chat API.
 	transcripts map[string]string
 }
@@ -60,7 +65,12 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{root: root, m: m, hub: hub, transcripts: map[string]string{}}
+	peers, err := peer.NewStore(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerAudit, _ := peer.NewAudit(data, 100)
+	e := &env{root: root, m: m, hub: hub, transcripts: map[string]string{}, broker: peer.NewBroker(time.Minute)}
 	s := New(Deps{
 		Transcripts: func(id string) (string, bool) {
 			p, ok := e.transcripts[id]
@@ -73,6 +83,10 @@ func newEnv(t *testing.T) *env {
 		Usage:      &usage.Client{CredentialsPath: "/nonexistent", TTL: time.Minute},
 		Version:    "v1.2.3-test",
 		Repository: "https://example.com/tether",
+		Peers:      peers,
+		PeerAudit:  peerAudit,
+		Broker:     e.broker,
+		Shell:      "/bin/sh",
 		Static: fstest.MapFS{
 			"index.html":    {Data: []byte("<html>app</html>")},
 			"assets/app.js": {Data: []byte("js")},
@@ -744,4 +758,162 @@ func TestUnixSocketForwardedHost(t *testing.T) {
 		t.Fatalf("websocket via unix socket: %v", err)
 	}
 	c.CloseNow()
+}
+
+// mcpCall posts to /internal/mcp like `tether mcp` does.
+func (e *env) mcpCall(t *testing.T, sid, key string, body any) (int, map[string]any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	res, err := http.Post(e.srv.URL+"/internal/mcp?sid="+sid+"&key="+key, "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var v map[string]any
+	json.NewDecoder(res.Body).Decode(&v)
+	return res.StatusCode, v
+}
+
+func TestRemoteLinkAndApprovalFlow(t *testing.T) {
+	e := newEnv(t)
+	// このtether自身を「接続元A」かつ「接続先B」として登録する（ペアリングの流れを通す）
+	for _, p := range []string{"/api/remote", "/api/remote/audit"} {
+		if res := e.do(t, "GET", p, nil, false); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s without token: %d", p, res.StatusCode)
+		}
+	}
+	res := e.do(t, "POST", "/api/remote/clients", map[string]any{
+		"name": "A", "url": e.srv.URL,
+		"policy": map[string]any{"status": true, "files": true, "exec": true, "delegate": false},
+	}, true)
+	var created struct {
+		Client struct {
+			ID string `json:"id"`
+		} `json:"client"`
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil || res.StatusCode != http.StatusCreated || !strings.HasPrefix(created.Code, "tether-pair:") {
+		t.Fatalf("add client: %d %v %+v", res.StatusCode, err, created)
+	}
+	if res := e.do(t, "POST", "/api/remote/remotes", map[string]any{"name": "B", "code": "tether-pair:broken"}, true); res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("broken code: %d", res.StatusCode)
+	}
+	res = e.do(t, "POST", "/api/remote/remotes", map[string]any{"name": "B", "code": created.Code}, true)
+	var remote struct {
+		ID     string      `json:"id"`
+		Token  string      `json:"token"`
+		Policy peer.Policy `json:"policy"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&remote); err != nil || res.StatusCode != http.StatusCreated || !remote.Policy.Exec || remote.Token != "" {
+		t.Fatalf("add remote: %d %v %+v", res.StatusCode, err, remote)
+	}
+	// 画面向けの一覧にトークンやハッシュは出さない
+	_, tok, _ := peer.ParsePairingCode(created.Code)
+	hash := sha256.Sum256([]byte(tok))
+	res = e.do(t, "GET", "/api/remote", nil, true)
+	raw, _ := io.ReadAll(res.Body)
+	if strings.Contains(string(raw), tok) || strings.Contains(string(raw), hex.EncodeToString(hash[:])) || !strings.Contains(string(raw), `"name":"B"`) {
+		t.Fatalf("remote state leaks secrets or misses B: %s", raw)
+	}
+
+	// Claude Codeのセッションから（tether mcp経由で）Bのコマンドを実行する
+	st, _ := e.m.Create(session.Options{Cwd: e.root})
+	sp := st.Spec()
+	if code, _ := e.mcpCall(t, sp.ID, "wrong", map[string]any{"method": "tools/list"}); code != http.StatusForbidden {
+		t.Fatalf("mcp with wrong key: %d", code)
+	}
+	code, v := e.mcpCall(t, sp.ID, sp.HookKey, map[string]any{"method": "tools/list"})
+	if code != 200 || len(v["tools"].([]any)) != len(peer.ToolList) {
+		t.Fatalf("tools/list: %d %v", code, v)
+	}
+	result := make(chan map[string]any, 1)
+	go func() {
+		_, v := e.mcpCall(t, sp.ID, sp.HookKey, map[string]any{"method": "tools/call", "name": "remote_exec", "arguments": map[string]any{"machine": "B", "command": "echo linked"}})
+		result <- v
+	}()
+	var approvals []peer.Approval
+	for range 200 {
+		res := e.do(t, "GET", "/api/remote", nil, true)
+		var st struct {
+			Approvals []peer.Approval `json:"approvals"`
+		}
+		json.NewDecoder(res.Body).Decode(&st)
+		if approvals = st.Approvals; len(approvals) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(approvals) != 1 || approvals[0].Op != "exec" || approvals[0].Session != sp.ID || approvals[0].Detail != "echo linked" {
+		t.Fatalf("approvals = %+v", approvals)
+	}
+	// MCPの通信から承認することはできない（承認のメソッドはない）
+	if code, _ := e.mcpCall(t, sp.ID, sp.HookKey, map[string]any{"method": "approve", "name": approvals[0].ID}); code != http.StatusBadRequest {
+		t.Fatalf("approve over mcp: %d", code)
+	}
+	// 承認は画面のAPIで行う（CSRFの検査あり）
+	if res := e.do(t, "POST", "/api/remote/approvals/"+approvals[0].ID, map[string]any{"allow": true}, false); res.StatusCode == http.StatusNoContent {
+		t.Fatal("approval without token accepted")
+	}
+	if res := e.do(t, "POST", "/api/remote/approvals/"+approvals[0].ID, map[string]any{"allow": true}, true); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("approve: %d", res.StatusCode)
+	}
+	select {
+	case v := <-result:
+		if v["isError"] != false || !strings.Contains(v["text"].(string), `"output": "linked\n"`) {
+			t.Fatalf("exec result = %v", v)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("tool call did not finish")
+	}
+	if res := e.do(t, "POST", "/api/remote/approvals/"+approvals[0].ID, map[string]any{"allow": true}, true); res.StatusCode != http.StatusGone {
+		t.Fatalf("approve twice: %d", res.StatusCode)
+	}
+	// 受け側の記録
+	res = e.do(t, "GET", "/api/remote/audit", nil, true)
+	var audit []peer.AuditEntry
+	json.NewDecoder(res.Body).Decode(&audit)
+	if len(audit) == 0 || audit[0].Op != "exec" || !audit[0].OK || audit[0].Client != "A" {
+		t.Fatalf("audit = %+v", audit)
+	}
+
+	// 接続元の許可を変えると、次の呼び出しから断られる
+	if res := e.do(t, "PUT", "/api/remote/clients/"+created.Client.ID+"/policy", map[string]any{"status": true}, true); res.StatusCode != 200 {
+		t.Fatalf("set policy: %d", res.StatusCode)
+	}
+	go func() {
+		_, v := e.mcpCall(t, sp.ID, sp.HookKey, map[string]any{"method": "tools/call", "name": "remote_exec", "arguments": map[string]any{"machine": "B", "command": "echo again"}})
+		result <- v
+	}()
+	for range 200 {
+		if p := e.broker.Pending(); len(p) == 1 {
+			e.broker.Decide(p[0].ID, peer.Decision{Allow: true})
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if v := <-result; v["isError"] != true || !strings.Contains(v["text"].(string), "403") {
+		t.Fatalf("exec after policy change = %v", v)
+	}
+	// 削除
+	if res := e.do(t, "DELETE", "/api/remote/remotes/"+remote.ID, nil, true); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete remote: %d", res.StatusCode)
+	}
+	if res := e.do(t, "DELETE", "/api/remote/clients/"+created.Client.ID, nil, true); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete client: %d", res.StatusCode)
+	}
+	if res := e.do(t, "DELETE", "/api/remote/clients/"+created.Client.ID, nil, true); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete client twice: %d", res.StatusCode)
+	}
+}
+
+func TestMCPRejectsShellSessions(t *testing.T) {
+	e := newEnv(t)
+	st, _ := e.m.Create(session.Options{Kind: session.KindShell, Cwd: e.root})
+	sp := st.Spec()
+	if code, _ := e.mcpCall(t, sp.ID, sp.HookKey, map[string]any{"method": "tools/list"}); code != http.StatusForbidden {
+		t.Fatalf("shell session: %d", code)
+	}
+	if code, _ := e.mcpCall(t, "missing", "x", map[string]any{"method": "tools/list"}); code != http.StatusForbidden {
+		t.Fatalf("missing session: %d", code)
+	}
 }

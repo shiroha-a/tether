@@ -22,7 +22,13 @@ type Launcher struct {
 	Env []string
 	// Shell is the login shell for shell sessions ($SHELL, falling back to /bin/bash).
 	Shell string
+	// RemoteTools reports whether to give Claude Code the tether-remote MCP
+	// server (other machines are linked). nil means never.
+	RemoteTools func() bool
 }
+
+// MCPServerName is the name of tether's MCP server in Claude Code.
+const MCPServerName = "tether-remote"
 
 // PermissionModes lists values accepted by `claude --permission-mode`.
 var PermissionModes = []string{"default", "acceptEdits", "plan", "auto", "bypassPermissions"}
@@ -46,7 +52,11 @@ func (l *Launcher) Command(spec Spec) *exec.Cmd {
 	if spec.PermissionMode != "" && spec.PermissionMode != "default" {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
-	args = append(args, "--settings", l.settingsJSON(spec))
+	remote := l.RemoteTools != nil && l.RemoteTools()
+	args = append(args, "--settings", l.settingsJSON(spec, remote))
+	if remote {
+		args = append(args, "--mcp-config", l.mcpConfigJSON(spec))
+	}
 	cmd := exec.Command(l.Bin, args...)
 	cmd.Dir = spec.Cwd
 	cmd.Env = l.env()
@@ -96,7 +106,19 @@ type hookMatcher struct {
 	Hooks []hookCommand `json:"hooks"`
 }
 
-func (l *Launcher) settingsJSON(spec Spec) string {
+func (l *Launcher) mcpConfigJSON(spec Spec) string {
+	cfg := map[string]any{"mcpServers": map[string]any{
+		MCPServerName: map[string]any{
+			"type":    "stdio",
+			"command": l.HookExe,
+			"args":    []string{"mcp", "--url", l.HookURL, "--sid", spec.ID, "--key", spec.HookKey},
+		},
+	}}
+	b, _ := json.Marshal(cfg)
+	return string(b)
+}
+
+func (l *Launcher) settingsJSON(spec Spec, remote bool) string {
 	cmd := strings.Join([]string{
 		shellQuote(l.HookExe), "hook",
 		"--url", shellQuote(l.HookURL),
@@ -104,15 +126,18 @@ func (l *Launcher) settingsJSON(spec Spec) string {
 		"--key", shellQuote(spec.HookKey),
 	}, " ")
 	m := []hookMatcher{{Hooks: []hookCommand{{Type: "command", Command: cmd}}}}
-	settings := map[string]any{
-		"hooks": map[string]any{
-			"Stop":             m,
-			"Notification":     m,
-			"SessionStart":     m,
-			"UserPromptSubmit": m,
-			// 許可確認の前に届くので、遅れて届く選択待ちの通知が回答済みかを判断するのに使う
-			"PreToolUse": m,
-		},
+	settings := map[string]any{}
+	if remote {
+		// 呼び出しごとにtetherの画面で承認するので、Claude Code側の確認は重ねない
+		settings["permissions"] = map[string]any{"allow": []string{"mcp__" + MCPServerName}}
+	}
+	settings["hooks"] = map[string]any{
+		"Stop":             m,
+		"Notification":     m,
+		"SessionStart":     m,
+		"UserPromptSubmit": m,
+		// 許可確認の前に届くので、遅れて届く選択待ちの通知が回答済みかを判断するのに使う
+		"PreToolUse": m,
 	}
 	b, _ := json.Marshal(settings)
 	return string(b)
@@ -135,8 +160,20 @@ func (l *Launcher) env() []string {
 		base = os.Environ()
 	}
 	out := make([]string, 0, len(base)+2)
-	for _, kv := range base {
-		skip := strings.HasPrefix(kv, "TERM=") || strings.HasPrefix(kv, "COLORTERM=")
+	for _, kv := range CleanEnv(base) {
+		if !strings.HasPrefix(kv, "TERM=") && !strings.HasPrefix(kv, "COLORTERM=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "TERM=xterm-256color", "COLORTERM=truecolor")
+}
+
+// CleanEnv returns env without the server-only variables (tether settings and
+// markers of an enclosing Claude Code), for processes started on the user's behalf.
+func CleanEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		skip := false
 		for _, p := range serverOnlyEnvPrefixes {
 			if strings.HasPrefix(kv, p) {
 				skip = true
@@ -146,7 +183,7 @@ func (l *Launcher) env() []string {
 			out = append(out, kv)
 		}
 	}
-	return append(out, "TERM=xterm-256color", "COLORTERM=truecolor")
+	return out
 }
 
 func shellQuote(s string) string {

@@ -117,18 +117,25 @@ func (h *Handler) stat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, results)
 }
 
-func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	dir, err := Resolve(h.Root, r.URL.Query().Get("path"))
+// Listing is the result of ListDir.
+type Listing struct {
+	Path    string  `json:"path"`
+	Parent  string  `json:"parent"`
+	Root    string  `json:"root"`
+	Entries []Entry `json:"entries"`
+}
+
+// ListDir lists a directory inside root, folders first. Dotfiles are skipped
+// unless hidden is set.
+func ListDir(root, p string, hidden bool) (Listing, error) {
+	dir, err := Resolve(root, p)
 	if err != nil {
-		writeFSError(w, err)
-		return
+		return Listing{}, err
 	}
 	des, err := os.ReadDir(dir)
 	if err != nil {
-		writeFSError(w, err)
-		return
+		return Listing{}, err
 	}
-	hidden := r.URL.Query().Get("hidden") == "1"
 	entries := make([]Entry, 0, len(des))
 	for _, de := range des {
 		if !hidden && strings.HasPrefix(de.Name(), ".") {
@@ -156,10 +163,19 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 	parent := ""
-	if dir != h.Root {
+	if dir != root {
 		parent = filepath.Dir(dir)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": dir, "parent": parent, "root": h.Root, "entries": entries})
+	return Listing{Path: dir, Parent: parent, Root: root, Entries: entries}, nil
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	l, err := ListDir(h.Root, r.URL.Query().Get("path"), r.URL.Query().Get("hidden") == "1")
+	if err != nil {
+		writeFSError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, l)
 }
 
 func (h *Handler) mkdir(w http.ResponseWriter, r *http.Request) {
@@ -277,29 +293,46 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"saved": saved})
 }
 
-func (h *Handler) preview(w http.ResponseWriter, r *http.Request) {
-	p, err := Resolve(h.Root, r.URL.Query().Get("path"))
+// Errors returned by ReadText.
+var (
+	ErrNotRegular = errors.New("not a regular file")
+	ErrBinary     = errors.New("binary file")
+)
+
+// TextFile is the result of ReadText.
+type TextFile struct {
+	Path      string    `json:"path"`
+	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"modTime"`
+	Kind      string    `json:"kind"`
+	Content   string    `json:"content"`
+	Truncated bool      `json:"truncated"`
+}
+
+// ReadText reads up to max bytes of a UTF-8 text file inside root.
+func ReadText(root, p string, max int64) (TextFile, error) {
+	full, err := Resolve(root, p)
 	if err != nil {
-		writeFSError(w, err)
-		return
+		return TextFile{}, err
 	}
-	f, err := os.Open(p)
+	f, err := os.Open(full)
 	if err != nil {
-		writeFSError(w, err)
-		return
+		return TextFile{}, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		http.Error(w, "not a regular file", http.StatusBadRequest)
-		return
-	}
-	buf, err := io.ReadAll(io.LimitReader(f, MaxPreview))
 	if err != nil {
-		writeFSError(w, err)
-		return
+		return TextFile{}, err
 	}
-	truncated := info.Size() > MaxPreview
+	if !info.Mode().IsRegular() {
+		return TextFile{}, ErrNotRegular
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, max))
+	if err != nil {
+		return TextFile{}, err
+	}
+	truncated := info.Size() > max
 	if truncated {
 		// 切り詰めでUTF-8の途中を切った場合に備え、末尾の不完全なルーンを落とす
 		for i := 0; i < utf8.UTFMax-1 && len(buf) > 0 && !utf8.Valid(buf); i++ {
@@ -307,18 +340,31 @@ func (h *Handler) preview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if bytes.IndexByte(buf, 0) >= 0 || !utf8.Valid(buf) {
-		http.Error(w, "binary file cannot be previewed", http.StatusUnsupportedMediaType)
-		return
+		return TextFile{}, ErrBinary
 	}
 	kind := "text"
-	switch strings.ToLower(filepath.Ext(p)) {
+	switch strings.ToLower(filepath.Ext(full)) {
 	case ".md", ".markdown":
 		kind = "markdown"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"path": p, "name": filepath.Base(p), "size": info.Size(), "modTime": info.ModTime(),
-		"kind": kind, "content": string(buf), "truncated": truncated,
-	})
+	return TextFile{
+		Path: full, Name: filepath.Base(full), Size: info.Size(), ModTime: info.ModTime(),
+		Kind: kind, Content: string(buf), Truncated: truncated,
+	}, nil
+}
+
+func (h *Handler) preview(w http.ResponseWriter, r *http.Request) {
+	t, err := ReadText(h.Root, r.URL.Query().Get("path"), MaxPreview)
+	switch {
+	case errors.Is(err, ErrNotRegular):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, ErrBinary):
+		http.Error(w, "binary file cannot be previewed", http.StatusUnsupportedMediaType)
+	case err != nil:
+		writeFSError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, t)
+	}
 }
 
 func writeFSError(w http.ResponseWriter, err error) {
