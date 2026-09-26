@@ -1022,6 +1022,18 @@ textarea {
   margin-bottom: 8px;
   color: var(--warn);
 }
+.chat-choice-context {
+  max-height: 9.5em;
+  margin: -2px 0 8px;
+  padding: 6px 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .chat-choice-detail {
   margin: -2px 0 8px;
   font-size: 13px;

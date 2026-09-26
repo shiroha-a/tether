@@ -140,7 +140,7 @@ export default function ChatView({
   const listRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   // 選択肢は会話記録に出ず画面にだけ描かれるので、ターミナルの画面を読んで取り出す
-  const menu = useScreenMenu(sessionId, running);
+  const { menu, busy } = useScreenMenu(sessionId, running);
 
   useEffect(() => {
     let offset = 0;
@@ -320,6 +320,8 @@ export default function ChatView({
               ターミナルで見る
             </button>
           </div>
+          {/* 何を許可するのか（ツール、コマンドやファイル）を、端末の許可確認の枠からそのまま出す */}
+          {menu.context.length > 0 && <pre className="chat-choice-context">{menu.context.join("\n")}</pre>}
           <div className="chat-options">
             {menu.options.map((o) => (
               <button
@@ -340,7 +342,10 @@ export default function ChatView({
           </div>
         </div>
       ) : (
-        activity === "waiting" && (
+        // 「入力待ち」の通知は選択肢が出てから数秒遅れて届き、ターミナルで選んだ後も次の応答完了まで残る。
+        // 画面上でClaudeが作業中なら、もう選択は済んでいるので出さない
+        activity === "waiting" &&
+        !busy && (
           <div className="chat-choice" role="group" aria-label="選択が必要です">
             <div className="chat-choice-head">
               <strong>選択が必要です</strong>

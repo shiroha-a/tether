@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { neutralizeExternalImages } from "../markdown";
+import { externalLinksInNewTab, neutralizeExternalImages } from "../markdown";
 import { api, type FsEntry, type Preview } from "../api";
 import { Modal } from "./Modal";
 
@@ -45,9 +45,9 @@ export default function PreviewDialog({ entry, onClose }: { entry: FsEntry; onCl
   const html = useMemo(() => {
     if (!preview || preview.kind !== "markdown" || raw) return "";
     // Markdown内のHTMLはそのまま描画せず、DOMPurifyでスクリプト等を取り除く。
-    // 相対パスの画像は同じサイトのダウンロードAPIに向け、外部の画像は読み込まずリンクにする
+    // 相対パスの画像は同じサイトのダウンロードAPIに向け、外部の画像は読み込まずリンクにする。外部リンクは新しいタブで開く
     const clean = DOMPurify.sanitize(marked.parse(preview.content, { async: false }));
-    return neutralizeExternalImages(resolveImages(clean, preview.path));
+    return externalLinksInNewTab(neutralizeExternalImages(resolveImages(clean, preview.path)));
   }, [preview, raw]);
 
   return (
