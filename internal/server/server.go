@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"path"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 	"tether/internal/guard"
 	"tether/internal/schedule"
 	"tether/internal/session"
+	"tether/internal/snippets"
 	"tether/internal/sysinfo"
 	"tether/internal/transcript"
 	"tether/internal/usage"
@@ -33,6 +35,7 @@ type Server struct {
 	hub       *events.Hub
 	notifier  *events.Notifier
 	scheduler *schedule.Scheduler
+	snippets  *snippets.Store
 	usage     *usage.Client
 	static    fs.FS
 	hosts     *guard.Hosts
@@ -53,7 +56,9 @@ type Deps struct {
 	Hub       *events.Hub
 	Notifier  *events.Notifier
 	Scheduler *schedule.Scheduler
-	Usage     *usage.Client
+	// Snippets holds the commands shown in shell sessions; nil disables the API.
+	Snippets *snippets.Store
+	Usage    *usage.Client
 	// Static is the built web UI; nil disables it.
 	Static fs.FS
 	// Hosts is the Host header allowlist; nil allows only IP literals and localhost.
@@ -73,7 +78,7 @@ type Deps struct {
 func New(d Deps) *Server {
 	return &Server{
 		root: d.Root, token: d.Token, sessions: d.Sessions, hub: d.Hub, notifier: d.Notifier,
-		scheduler: d.Scheduler, usage: d.Usage, static: d.Static, hosts: d.Hosts,
+		scheduler: d.Scheduler, snippets: d.Snippets, usage: d.Usage, static: d.Static, hosts: d.Hosts,
 		transcripts: d.Transcripts, startupDelay: d.StartupDelay, enterDelay: 300 * time.Millisecond,
 		version: cmp.Or(d.Version, "dev"), repository: d.Repository, startedAt: time.Now(),
 	}
@@ -95,6 +100,12 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/schedules", s.listSchedules)
 	api.HandleFunc("POST /api/schedules", s.createSchedule)
 	api.HandleFunc("DELETE /api/schedules/{id}", s.deleteSchedule)
+	if s.snippets != nil {
+		api.HandleFunc("GET /api/snippets", s.listSnippets)
+		api.HandleFunc("POST /api/snippets", s.createSnippet)
+		api.HandleFunc("PATCH /api/snippets/{id}", s.updateSnippet)
+		api.HandleFunc("DELETE /api/snippets/{id}", s.deleteSnippet)
+	}
 	api.HandleFunc("GET /api/usage", s.usage.Handler)
 	api.HandleFunc("GET /api/notifications", s.notifier.HandleRecent)
 	api.HandleFunc("GET /api/system", (&sysinfo.Reader{ProcDir: "/proc", DiskPath: s.root}).Handler)
@@ -307,6 +318,66 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.Publish(map[string]any{"type": "schedule.changed"})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type snippetBody struct {
+	Label   string `json:"label"`
+	Command string `json:"command"`
+}
+
+func (s *Server) listSnippets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.snippets.List())
+}
+
+func (s *Server) createSnippet(w http.ResponseWriter, r *http.Request) {
+	var body snippetBody
+	if !readJSON(w, r, &body) {
+		return
+	}
+	it, err := s.snippets.Add(body.Label, body.Command)
+	if snippetErr(w, err) {
+		return
+	}
+	s.hub.Publish(map[string]any{"type": "snippets.changed"})
+	writeJSON(w, http.StatusCreated, it)
+}
+
+func (s *Server) updateSnippet(w http.ResponseWriter, r *http.Request) {
+	var body snippetBody
+	if !readJSON(w, r, &body) {
+		return
+	}
+	it, err := s.snippets.Update(r.PathValue("id"), body.Label, body.Command)
+	if snippetErr(w, err) {
+		return
+	}
+	s.hub.Publish(map[string]any{"type": "snippets.changed"})
+	writeJSON(w, http.StatusOK, it)
+}
+
+func (s *Server) deleteSnippet(w http.ResponseWriter, r *http.Request) {
+	if snippetErr(w, s.snippets.Delete(r.PathValue("id"))) {
+		return
+	}
+	s.hub.Publish(map[string]any{"type": "snippets.changed"})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// snippetErr writes the response for a snippets error and reports whether there was one.
+func snippetErr(w http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, snippets.ErrNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, snippets.ErrInvalid):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		// 保存の失敗はサーバ側の問題なので、ファイルパスを含むエラーは返さずログに残す
+		log.Printf("snippets: %v", err)
+		http.Error(w, "failed to save snippets", http.StatusInternalServerError)
+	}
+	return true
 }
 
 // transcriptTail is how many items the first transcript request returns.

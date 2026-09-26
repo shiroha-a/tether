@@ -25,6 +25,7 @@ import (
 	"tether/internal/listen"
 	"tether/internal/schedule"
 	"tether/internal/session"
+	"tether/internal/snippets"
 	"tether/internal/usage"
 )
 
@@ -34,6 +35,7 @@ type env struct {
 	srv  *httptest.Server
 	root string
 	m    *session.Manager
+	hub  *events.Hub
 	// transcripts maps claude session ids to transcript files for the chat API.
 	transcripts map[string]string
 }
@@ -54,7 +56,11 @@ func newEnv(t *testing.T) *env {
 	hub := events.NewHub()
 	m.OnEvent = func(e session.Event) { hub.Publish(e) }
 	sched, _ := schedule.New(data, nil)
-	e := &env{root: root, m: m, transcripts: map[string]string{}}
+	snips, err := snippets.New(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{root: root, m: m, hub: hub, transcripts: map[string]string{}}
 	s := New(Deps{
 		Transcripts: func(id string) (string, bool) {
 			p, ok := e.transcripts[id]
@@ -63,6 +69,7 @@ func newEnv(t *testing.T) *env {
 		Root: root, Token: token, Sessions: m, Hub: hub,
 		Notifier:   &events.Notifier{Hub: hub, Sessions: m},
 		Scheduler:  sched,
+		Snippets:   snips,
 		Usage:      &usage.Client{CredentialsPath: "/nonexistent", TTL: time.Minute},
 		Version:    "v1.2.3-test",
 		Repository: "https://example.com/tether",
@@ -379,6 +386,99 @@ func TestAboutVersionDefaultsToDev(t *testing.T) {
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&about); err != nil || about.Version != "dev" {
 		t.Errorf("version = %q (%v)", about.Version, err)
+	}
+}
+
+func TestSnippetsAPI(t *testing.T) {
+	e := newEnv(t)
+	events, unsubscribe := e.hub.Subscribe()
+	defer unsubscribe()
+	expectChanged := func(what string) {
+		t.Helper()
+		select {
+		case b := <-events:
+			if !strings.Contains(string(b), `"snippets.changed"`) {
+				t.Fatalf("%s: unexpected event %s", what, b)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s: no snippets.changed event", what)
+		}
+	}
+	type item struct {
+		ID      string `json:"id"`
+		Label   string `json:"label"`
+		Command string `json:"command"`
+	}
+	list := func() []item {
+		t.Helper()
+		var out []item
+		res := e.do(t, "GET", "/api/snippets", nil, true)
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil || res.StatusCode != 200 {
+			t.Fatalf("list: %d %v", res.StatusCode, err)
+		}
+		return out
+	}
+
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/api/snippets"}, {"POST", "/api/snippets"}, {"PATCH", "/api/snippets/x"}, {"DELETE", "/api/snippets/x"},
+	} {
+		// CSRFヘッダは付けて、トークン認証だけで拒否されることを確かめる
+		req, _ := http.NewRequest(c.method, e.srv.URL+c.path, strings.NewReader(`{"command":"ls"}`))
+		req.Header.Set(guard.CSRFHeader, "1")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s without token: %d", c.method, c.path, res.StatusCode)
+		}
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("initial list = %+v", got)
+	}
+
+	res := e.do(t, "POST", "/api/snippets", map[string]string{"label": "状態", "command": "git status"}, true)
+	var a item
+	if err := json.NewDecoder(res.Body).Decode(&a); err != nil || res.StatusCode != http.StatusCreated || a.ID == "" || a.Command != "git status" {
+		t.Fatalf("create: %d %v %+v", res.StatusCode, err, a)
+	}
+	expectChanged("create")
+	if res := e.do(t, "POST", "/api/snippets", map[string]string{"command": "echo a\nrm -rf ~"}, true); res.StatusCode != http.StatusBadRequest {
+		t.Errorf("multi-line command: %d", res.StatusCode)
+	}
+
+	res = e.do(t, "PATCH", "/api/snippets/"+a.ID, map[string]string{"label": "", "command": "git status -sb"}, true)
+	var u item
+	if err := json.NewDecoder(res.Body).Decode(&u); err != nil || res.StatusCode != 200 || u.ID != a.ID || u.Label != "" || u.Command != "git status -sb" {
+		t.Fatalf("update: %d %v %+v", res.StatusCode, err, u)
+	}
+	expectChanged("update")
+	if res := e.do(t, "PATCH", "/api/snippets/"+a.ID, map[string]string{"command": ""}, true); res.StatusCode != http.StatusBadRequest {
+		t.Errorf("update to empty: %d", res.StatusCode)
+	}
+	if res := e.do(t, "PATCH", "/api/snippets/missing", map[string]string{"command": "ls"}, true); res.StatusCode != http.StatusNotFound {
+		t.Errorf("update missing: %d", res.StatusCode)
+	}
+	if got := list(); len(got) != 1 || got[0] != u {
+		t.Fatalf("list after update = %+v", got)
+	}
+
+	if res := e.do(t, "DELETE", "/api/snippets/"+a.ID, nil, true); res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: %d", res.StatusCode)
+	}
+	expectChanged("delete")
+	if res := e.do(t, "DELETE", "/api/snippets/"+a.ID, nil, true); res.StatusCode != http.StatusNotFound {
+		t.Errorf("delete twice: %d", res.StatusCode)
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("list after delete = %+v", got)
+	}
+	// 失敗した操作ではイベントを流さない
+	select {
+	case b := <-events:
+		t.Fatalf("event after failed requests: %s", b)
+	default:
 	}
 }
 

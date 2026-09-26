@@ -136,6 +136,14 @@ export interface SystemInfo {
   uptimeSec: number;
 }
 
+/** A saved shell command (GET /api/snippets). */
+export interface Snippet {
+  id: string;
+  label: string;
+  command: string;
+  createdAt: string;
+}
+
 /** Build and project information returned by GET /api/about. */
 export interface AboutInfo {
   version: string;
@@ -248,6 +256,11 @@ export const api = {
   notifications: () => request<Notice[]>("GET", "/api/notifications"),
   system: () => request<SystemInfo>("GET", "/api/system"),
   about: () => request<AboutInfo>("GET", "/api/about"),
+  snippets: () => request<Snippet[]>("GET", "/api/snippets"),
+  addSnippet: (label: string, command: string) => request<Snippet>("POST", "/api/snippets", { label, command }),
+  updateSnippet: (id: string, label: string, command: string) =>
+    request<Snippet>("PATCH", `/api/snippets/${q(id)}`, { label, command }),
+  deleteSnippet: (id: string) => request<void>("DELETE", `/api/snippets/${q(id)}`),
   usage: (force = false) => request<Usage>("GET", `/api/usage${force ? "?force=1" : ""}`),
   schedules: (session: string) => request<ScheduleItem[]>("GET", `/api/schedules?session=${q(session)}`),
   addSchedule: (sessionId: string, prompt: string, runAt: Date) =>
