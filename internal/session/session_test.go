@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -326,7 +327,7 @@ func TestLauncherCommand(t *testing.T) {
 	if err := json.Unmarshal([]byte(args[slices.Index(args, "--settings")+1]), &settings); err != nil {
 		t.Fatal(err)
 	}
-	for _, ev := range []string{"Stop", "Notification", "SessionStart", "UserPromptSubmit"} {
+	for _, ev := range []string{"Stop", "Notification", "SessionStart", "UserPromptSubmit", "PreToolUse"} {
 		hs := settings.Hooks[ev]
 		if len(hs) != 1 || !strings.Contains(hs[0].Hooks[0].Command, `'/opt/cc deck/tether' hook`) || !strings.Contains(hs[0].Hooks[0].Command, `'k'\''ey'`) {
 			t.Fatalf("hook %s = %+v", ev, hs)
@@ -424,5 +425,114 @@ func TestTranscriptPath(t *testing.T) {
 		if got, ok := l.TranscriptPath(bad); ok {
 			t.Errorf("TranscriptPath(%q) = %q, want not found", bad, got)
 		}
+	}
+}
+
+func TestAnswersMenu(t *testing.T) {
+	for in, want := range map[string]bool{
+		"\r":     true,
+		"abc\r":  true, // 入力欄の送信
+		"\x1b":   true, // Escでキャンセル
+		"1":      true,
+		"9":      true,
+		"0":      false,
+		"12":     false, // 数字の入力（選択ではない）
+		"\x1b[A": false, // ↑は移動だけ
+		"\x1b[B": false,
+		"\t":     false,
+		"y":      false,
+		"hello":  false,
+		"":       false,
+	} {
+		if got := answersMenu([]byte(in)); got != want {
+			t.Errorf("answersMenu(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestAnsweringClearsWaiting(t *testing.T) {
+	m, dir := newTestManager(t, "cat", 0)
+	var events []Event
+	var mu sync.Mutex
+	m.OnEvent = func(e Event) { mu.Lock(); events = append(events, e); mu.Unlock() }
+	s, err := m.Create(Options{Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activity := func() string { return s.Status().Activity }
+	updates := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, e := range events {
+			if e.Type == "session.updated" && e.Session == s.Spec().ID {
+				n++
+			}
+		}
+		return n
+	}
+
+	m.SetActivity(s.Spec().ID, ActivityWaiting, "Claude needs your permission")
+	before := updates()
+	// カーソルの移動では答えたことにならない
+	s.Write([]byte("\x1b[B"))
+	if activity() != ActivityWaiting {
+		t.Fatalf("arrow key changed activity to %q", activity())
+	}
+	s.Write([]byte("\r"))
+	st := s.Status()
+	if st.Activity != ActivityWorking || st.ActivityDetail != "" {
+		t.Fatalf("after Enter: %q %q", st.Activity, st.ActivityDetail)
+	}
+	if updates() != before+1 {
+		t.Fatalf("session.updated events: %d -> %d", before, updates())
+	}
+	// 待ちでないときのEnterは状態を変えない（完了のまま）
+	m.SetActivity(s.Spec().ID, ActivityIdle, "")
+	s.Write([]byte("\r"))
+	if activity() != ActivityIdle {
+		t.Fatalf("Enter while idle changed activity to %q", activity())
+	}
+}
+
+func TestLateWaitingNotification(t *testing.T) {
+	m, dir := newTestManager(t, "cat", 0)
+	s, err := m.Create(Options{Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Spec().ID
+	activity := func() string { return s.Status().Activity }
+
+	// PreToolUseを受けていないセッションでは、従来どおり待ちにする
+	s.Write([]byte("\r"))
+	if set, _ := m.SetWaiting(id, "x"); !set || activity() != ActivityWaiting {
+		t.Fatalf("without PreToolUse: set=%v activity=%q", set, activity())
+	}
+	m.SetActivity(id, ActivityWorking, "")
+
+	// ツール開始 → 通知 の順なら待ちになる
+	m.ToolStarted(id)
+	if set, _ := m.SetWaiting(id, "x"); !set || activity() != ActivityWaiting {
+		t.Fatalf("prompt not answered: set=%v activity=%q", set, activity())
+	}
+	// 待ちの間に次のツールが始まったら、もう答えている
+	m.ToolStarted(id)
+	if activity() != ActivityWorking {
+		t.Fatalf("PreToolUse while waiting: %q", activity())
+	}
+
+	// ツール開始 → ターミナルで回答 → 遅れて通知 の順なら、待ちにしない
+	m.ToolStarted(id)
+	time.Sleep(2 * time.Millisecond)
+	s.Write([]byte("1"))
+	if set, _ := m.SetWaiting(id, "x"); set || activity() != ActivityWorking {
+		t.Fatalf("already answered: set=%v activity=%q", set, activity())
+	}
+	// 次のツールの許可確認では、また待ちにできる
+	time.Sleep(2 * time.Millisecond)
+	m.ToolStarted(id)
+	if set, _ := m.SetWaiting(id, "y"); !set || activity() != ActivityWaiting {
+		t.Fatalf("next prompt: set=%v activity=%q", set, activity())
 	}
 }

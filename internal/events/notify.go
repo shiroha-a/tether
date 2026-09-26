@@ -82,6 +82,8 @@ func (n *Notifier) HandleHook(w http.ResponseWriter, r *http.Request) {
 	switch p.HookEventName {
 	case "UserPromptSubmit":
 		n.Sessions.SetActivity(sid, session.ActivityWorking, "")
+	case "PreToolUse":
+		n.Sessions.ToolStarted(sid)
 	case "Stop":
 		n.Sessions.SetActivity(sid, session.ActivityIdle, "")
 		if n.shouldNotifyStop(sid) {
@@ -94,8 +96,10 @@ func (n *Notifier) HandleHook(w http.ResponseWriter, r *http.Request) {
 			if msg == "" {
 				msg = "選択を待っています"
 			}
-			n.Sessions.SetActivity(sid, session.ActivityWaiting, msg)
-			n.Send(Notification{Kind: "attention", Session: sid, Label: label(spec), Cwd: spec.Cwd, Message: msg})
+			// 通知が届く前にもう答えていれば、待ちにも通知にもしない
+			if set, _ := n.Sessions.SetWaiting(sid, msg); set {
+				n.Send(Notification{Kind: "attention", Session: sid, Label: label(spec), Cwd: spec.Cwd, Message: msg})
+			}
 		case notifyIdle:
 			// 応答後にしばらく入力がないときの通知。完了の通知と重複するので、状態だけ完了にする
 			n.Sessions.SetActivity(sid, session.ActivityIdle, "")

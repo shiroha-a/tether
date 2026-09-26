@@ -80,6 +80,9 @@ func (m *Manager) wire(s *Session) *Session {
 	s.onExit = func(s *Session) {
 		m.emit(Event{Type: "session.exited", Session: s.Spec().ID})
 	}
+	s.onActivity = func(s *Session) {
+		m.emit(Event{Type: "session.updated", Session: s.Spec().ID})
+	}
 	return s
 }
 
@@ -217,6 +220,44 @@ func (m *Manager) SetActivity(id, activity, detail string) error {
 		m.emit(Event{Type: "session.updated", Session: id})
 	}
 	return nil
+}
+
+// ToolStarted records a PreToolUse hook. A session still marked as waiting
+// has had its prompt answered, since Claude Code is starting a tool.
+func (m *Manager) ToolStarted(id string) error {
+	s, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.toolStartAt = time.Now()
+	changed := s.running && s.activity == ActivityWaiting
+	if changed {
+		s.activity, s.activityAt, s.activityDetail = ActivityWorking, s.toolStartAt, ""
+	}
+	s.mu.Unlock()
+	if changed {
+		m.emit(Event{Type: "session.updated", Session: id})
+	}
+	return nil
+}
+
+// SetWaiting marks the session as waiting for a choice, unless the prompt was
+// already answered: Claude Code sends the permission notification several
+// seconds after showing the prompt. It reports whether the state was set.
+func (m *Manager) SetWaiting(id, detail string) (bool, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	// PreToolUseを受けていない（古い設定で起動した）セッションでは判断できないので、従来どおり待ちにする
+	answered := !s.toolStartAt.IsZero() && s.answeredAt.After(s.toolStartAt)
+	s.mu.Unlock()
+	if answered {
+		return false, nil
+	}
+	return true, m.SetActivity(id, ActivityWaiting, detail)
 }
 
 // Stop kills the process but keeps the session for later resume.

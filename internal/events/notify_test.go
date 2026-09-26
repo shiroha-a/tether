@@ -219,3 +219,45 @@ func TestNotificationTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestAnsweredPromptSkipsLateNotification(t *testing.T) {
+	n, sp, ch := setup(t, "")
+	s, _ := n.Sessions.Get(sp.ID)
+	activity := func() string { return s.Status().Activity }
+	perm := `{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}`
+
+	// 許可確認が出てすぐターミナルで答え、その後に通知が届く
+	hook(n, sp.ID, sp.HookKey, `{"hook_event_name":"UserPromptSubmit"}`)
+	hook(n, sp.ID, sp.HookKey, `{"hook_event_name":"PreToolUse"}`)
+	time.Sleep(2 * time.Millisecond)
+	s.Write([]byte("\r"))
+	hook(n, sp.ID, sp.HookKey, perm)
+	if got := activity(); got != session.ActivityWorking {
+		t.Fatalf("late notification set activity %q", got)
+	}
+	for note := next(t, ch); note != nil; note = next(t, ch) {
+		if note.Kind == "attention" {
+			t.Fatalf("attention sent for an answered prompt: %+v", note)
+		}
+	}
+
+	// 答える前に通知が届けば、待ちになり通知も送る
+	time.Sleep(2 * time.Millisecond)
+	hook(n, sp.ID, sp.HookKey, `{"hook_event_name":"PreToolUse"}`)
+	hook(n, sp.ID, sp.HookKey, perm)
+	if got := activity(); got != session.ActivityWaiting {
+		t.Fatalf("unanswered prompt: activity %q", got)
+	}
+	found := false
+	for note := next(t, ch); note != nil; note = next(t, ch) {
+		found = found || note.Kind == "attention"
+	}
+	if !found {
+		t.Fatal("no attention notification for an unanswered prompt")
+	}
+	// 待ちの間に次のツールが始まれば作業中に戻る
+	hook(n, sp.ID, sp.HookKey, `{"hook_event_name":"PreToolUse"}`)
+	if got := activity(); got != session.ActivityWorking {
+		t.Fatalf("PreToolUse while waiting: %q", got)
+	}
+}

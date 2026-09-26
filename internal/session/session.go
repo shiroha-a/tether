@@ -86,9 +86,15 @@ type Session struct {
 	activity       string
 	activityAt     time.Time
 	activityDetail string
+	// answeredAt is when input that answers a menu (Enter, Esc, a digit) last
+	// arrived; toolStartAt is the last PreToolUse hook. Together they tell
+	// whether a late permission notification was already answered.
+	answeredAt  time.Time
+	toolStartAt time.Time
 	// Callbacks set by the manager.
 	onClientsChanged func(s *Session, n int)
 	onExit           func(s *Session)
+	onActivity       func(s *Session)
 }
 
 func newSession(spec Spec) *Session {
@@ -291,17 +297,45 @@ func (s *Session) resizeLocked() {
 	s.broadcastLocked(Frame{Data: []byte(`{"type":"size","cols":` + itoa(cols) + `,"rows":` + itoa(rows) + `}`)})
 }
 
-// Write sends input to the pty.
+// Write sends input to the pty. Input that answers a menu while the session
+// is waiting for a choice marks it as working again.
 func (s *Session) Write(p []byte) error {
 	s.mu.Lock()
 	ptmx := s.ptmx
-	s.spec.LastActiveAt = time.Now()
+	now := time.Now()
+	s.spec.LastActiveAt = now
+	changed := false
+	if ptmx != nil && answersMenu(p) {
+		s.answeredAt = now
+		// 選択待ちの状態は次のhook（Stop等）まで変わらないので、答えた時点で作業中に戻す
+		if s.activity == ActivityWaiting {
+			s.activity, s.activityAt, s.activityDetail = ActivityWorking, now, ""
+			changed = true
+		}
+	}
+	onActivity := s.onActivity
 	s.mu.Unlock()
 	if ptmx == nil {
 		return errors.New("session is not running")
 	}
+	if changed && onActivity != nil {
+		onActivity(s)
+	}
 	_, err := ptmx.Write(p)
 	return err
+}
+
+// answersMenu reports whether input confirms or cancels a Claude Code menu:
+// Enter, a lone Esc, or a single digit that picks an option directly.
+// Arrow keys (which start with Esc) only move the cursor.
+func answersMenu(p []byte) bool {
+	switch {
+	case bytes.IndexByte(p, '\r') >= 0:
+		return true
+	case len(p) == 1 && (p[0] == 0x1b || ('1' <= p[0] && p[0] <= '9')):
+		return true
+	}
+	return false
 }
 
 // Stop terminates the process group, escalating to SIGKILL after a grace period.

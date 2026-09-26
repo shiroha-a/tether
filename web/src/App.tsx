@@ -26,6 +26,7 @@ import { applyTheme, loadTheme, saveTheme, watchSystemTheme, type ThemePref } fr
 import UsageWidget from "./components/UsageWidget";
 import { notifyPermission, requestNotifyPermission, showSystemNotification } from "./notify";
 import { loadRecentDirs, rememberDir } from "./prefs";
+import { answeredChoices } from "./attention";
 
 type Phase = "loading" | "login" | "ready" | "error";
 
@@ -85,6 +86,8 @@ export default function App() {
   const [recentVersion, setRecentVersion] = useState(0);
   const [browserPath, setBrowserPath] = useState<string | undefined>();
   const [attention, setAttention] = useState<Set<string>>(new Set());
+  // 選択待ちの通知を受けたセッションと、その通知の時刻（選択が済んだら要対応の印を外すため）
+  const choiceNoticesRef = useRef(new Map<string, number>());
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [fontSize, setFontSize] = useState(readFontSize);
   const [sessionView, setSessionView] = useState<SessionView>(readSessionView);
@@ -184,6 +187,8 @@ export default function App() {
           const watching = cur === n.session && v === "session" && document.visibilityState === "visible";
           if (!watching) {
             if (n.session) setAttention((prev) => new Set(prev).add(n.session));
+            if (n.session && n.kind === "attention")
+              choiceNoticesRef.current.set(n.session, Date.parse(n.at) || Date.now());
             pushToast(n);
             showSystemNotification(n);
           }
@@ -213,6 +218,18 @@ export default function App() {
     setView("home");
     setActiveId(null);
   };
+
+  // 別の端末やターミナルで選択が済んだら、ホームや一覧の「入力待ち」の印を外す
+  useEffect(() => {
+    const done = answeredChoices(sessions, choiceNoticesRef.current);
+    if (done.length === 0) return;
+    for (const id of done) choiceNoticesRef.current.delete(id);
+    setAttention((prev) => {
+      const next = new Set(prev);
+      for (const id of done) next.delete(id);
+      return next;
+    });
+  }, [sessions]);
 
   const select = useCallback((id: string) => {
     pushUrl("session", id);

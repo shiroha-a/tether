@@ -110,6 +110,8 @@ func (l *Launcher) settingsJSON(spec Spec) string {
 			"Notification":     m,
 			"SessionStart":     m,
 			"UserPromptSubmit": m,
+			// 許可確認の前に届くので、遅れて届く選択待ちの通知が回答済みかを判断するのに使う
+			"PreToolUse": m,
 		},
 	}
 	b, _ := json.Marshal(settings)
