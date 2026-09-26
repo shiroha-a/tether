@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # 依存パッケージに新しく見つかった脆弱性に気づけるよう、変更がなくても週1回実行する
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (format, vet, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  web:
+    name: Web (format, typecheck, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build (web UI embedded)
+        run: make build
+      - name: Smoke test
+        run: |
+          mkdir -p "$RUNNER_TEMP/data"
+          TETHER_ADDR=127.0.0.1:3199 TETHER_DATA_DIR="$RUNNER_TEMP/data" ./bin/tether serve > "$RUNNER_TEMP/server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do curl -sf http://127.0.0.1:3199/api/health >/dev/null && break; sleep 0.2; done
+          set -x
+          curl -sf http://127.0.0.1:3199/api/health | grep -q '"ok":true'
+          # 埋め込んだ画面が配信され、セキュリティヘッダが付いている
+          curl -sf http://127.0.0.1:3199/ | grep -q '<div id="root">'
+          curl -sfI http://127.0.0.1:3199/ | grep -qi '^content-security-policy:'
+          # 他のサイトからの書き込みは拒否される
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' -H 'X-Tether: 1' -d '{}' http://127.0.0.1:3199/api/snippets)" = 403
+          ./bin/tether version
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log" || true
+
+  vulncheck:
+    name: Vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: npm audit (runtime dependencies)
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high

@@ -1,5 +1,7 @@
 # tether
 
+[![CI](https://github.com/shiroha-a/tether/actions/workflows/ci.yml/badge.svg)](https://github.com/shiroha-a/tether/actions/workflows/ci.yml)
+
 A self-hosted web app for running Claude Code from any browser — desktop, phone, or installed as a PWA. Start sessions in any folder, keep them running on your server, and pick them up from another device. The frontend is embedded in a single Go binary, so Node.js is not needed at runtime.
 
 ## Features
@@ -44,8 +46,11 @@ Open http://127.0.0.1:3100, or http://&lt;tailscale-hostname-or-ip&gt;:3100 from
 make dev-server   # Go server on :3100
 make dev-web      # Vite on :5173, proxies /api and /ws to :3100
 make test         # go vet, go test -race, tsc, vitest
+make check        # the same checks as CI: gofmt, go vet, go test -race, prettier, tsc, vitest
 make fmt          # gofmt, prettier
 ```
+
+CI (GitHub Actions) runs on pushes to `main`, on pull requests and weekly: format checks, `go vet`, `go test -race`, TypeScript and vitest, a full build with the embedded UI plus a smoke test of the binary, and `govulncheck` / `npm audit`. Dependabot proposes weekly updates for Go modules, npm packages and the Actions used.
 
 ## Configuration (environment variables)
 

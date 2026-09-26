@@ -3,7 +3,7 @@ export GOTOOLCHAIN ?= go1.27.1
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all web build test fmt dev-server dev-web clean install-service
+.PHONY: all web build test check fmt dev-server dev-web clean install-service
 
 all: build
 
@@ -17,6 +17,13 @@ test:
 	go vet ./...
 	go test -race ./...
 	cd web && npm run typecheck && npm test
+
+# CI（.github/workflows/ci.yml）と同じ確認をまとめて行う
+check:
+	@test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "gofmt needed"; exit 1; }
+	go vet ./...
+	go test -race -count=1 ./...
+	cd web && npm run format:check && npm run typecheck && npm test
 
 fmt:
 	gofmt -w $$(git ls-files '*.go' 2>/dev/null || find . -name '*.go' -not -path './web/node_modules/*')
