@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write src index.html vite.config.ts public/sw.js",
+    "format:check": "prettier --check src index.html vite.config.ts public/sw.js",
     "test": "vitest run"
   },
   "dependencies": {
