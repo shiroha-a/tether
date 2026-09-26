@@ -84,3 +84,24 @@ export function toolBreakdown(tools: ToolEntry[]): string {
   }
   return [...counts].map(([name, n]) => (n > 1 ? `${name}×${n}` : name)).join("、");
 }
+
+/** What Enter does in the chat input, given the modifier keys. */
+export function enterAction(k: {
+  ctrl: boolean;
+  meta: boolean;
+  shift: boolean;
+  alt: boolean;
+  touch: boolean;
+}): "send" | "newline" | "default" {
+  // Alt+Enterはブラウザが改行を入れないので、自分で入れる
+  if (k.alt) return "newline";
+  if (k.ctrl || k.meta) return "send";
+  // スマホではEnterは改行にして、送信はボタンで行う。Shift+Enterはブラウザの改行に任せる
+  if (k.touch || k.shift) return "default";
+  return "send";
+}
+
+/** Replaces the selection with a newline and returns the new text and caret position. */
+export function insertNewline(text: string, start: number, end: number): { text: string; caret: number } {
+  return { text: text.slice(0, start) + "\n" + text.slice(end), caret: start + 1 };
+}

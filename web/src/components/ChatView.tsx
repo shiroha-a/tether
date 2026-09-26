@@ -1,6 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { api, type Activity, type ChatItem, type InputKey } from "../api";
-import { buildEntries, groupTools, mergeItems, toolBreakdown, type ChatEntry, type ToolGroup } from "../chat";
+import {
+  buildEntries,
+  enterAction,
+  groupTools,
+  insertNewline,
+  mergeItems,
+  toolBreakdown,
+  type ChatEntry,
+  type ToolGroup,
+} from "../chat";
 import { useScreenMenu } from "../hooks/useScreenMenu";
 import { keysToChoose } from "../screenMenu";
 import { renderMarkdown } from "../markdown";
@@ -138,6 +147,14 @@ export default function ChatView({
   const [pending, setPending] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Alt+Enterで改行を入れた後のカーソル位置。値を差し替えるとカーソルが末尾に移るので、描画直後に戻す
+  const caretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (caretRef.current === null) return;
+    inputRef.current?.setSelectionRange(caretRef.current, caretRef.current);
+    caretRef.current = null;
+  }, [draft]);
   const stickRef = useRef(true);
   // 選択肢は会話記録に出ず画面にだけ描かれるので、ターミナルの画面を読んで取り出す
   const { menu, busy } = useScreenMenu(sessionId, running);
@@ -373,17 +390,30 @@ export default function ChatView({
       {error && <p className="error chat-error">{error}</p>}
       <div className="chat-input">
         <textarea
+          ref={inputRef}
           value={draft}
           rows={1}
-          placeholder={isTouch ? "メッセージを入力" : "メッセージを入力（Enterで送信、Shift+Enterで改行）"}
+          placeholder={isTouch ? "メッセージを入力" : "メッセージを入力（Enterで送信、Shift+EnterかAlt+Enterで改行）"}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
-            // スマホではEnterは改行にして、送信はボタンで行う
-            if (e.ctrlKey || e.metaKey || (!isTouch && !e.shiftKey)) {
-              e.preventDefault();
+            const action = enterAction({
+              ctrl: e.ctrlKey,
+              meta: e.metaKey,
+              shift: e.shiftKey,
+              alt: e.altKey,
+              touch: isTouch,
+            });
+            if (action === "default") return;
+            e.preventDefault();
+            if (action === "send") {
               send();
+              return;
             }
+            const el = e.currentTarget;
+            const next = insertNewline(draft, el.selectionStart, el.selectionEnd);
+            caretRef.current = next.caret;
+            setDraft(next.text);
           }}
         />
         <button className="btn primary" onClick={send} disabled={!draft.trim() || sending}>

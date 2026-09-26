@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatItem } from "./api";
-import { buildEntries, groupTools, mergeItems, toolBreakdown } from "./chat";
+import { buildEntries, groupTools, mergeItems, toolBreakdown, enterAction, insertNewline } from "./chat";
 
 const item = (id: string, kind: ChatItem["kind"], extra: Partial<ChatItem> = {}): ChatItem => ({
   id,
@@ -116,5 +116,36 @@ describe("toolBreakdown", () => {
       ),
     )[0];
     expect(tools.type === "group" && toolBreakdown(tools.tools)).toBe("Bash×3、Read×2、Grep");
+  });
+});
+
+describe("enterAction", () => {
+  const k = (o: Partial<Record<"ctrl" | "meta" | "shift" | "alt" | "touch", boolean>>) =>
+    enterAction({ ctrl: false, meta: false, shift: false, alt: false, touch: false, ...o });
+  it("sends with Enter on a keyboard and with Ctrl/Cmd+Enter everywhere", () => {
+    expect(k({})).toBe("send");
+    expect(k({ ctrl: true })).toBe("send");
+    expect(k({ meta: true })).toBe("send");
+    expect(k({ touch: true, ctrl: true })).toBe("send");
+    expect(k({ touch: true, meta: true })).toBe("send");
+  });
+  it("inserts a newline with Alt+Enter, even on touch devices or with other modifiers", () => {
+    expect(k({ alt: true })).toBe("newline");
+    expect(k({ alt: true, touch: true })).toBe("newline");
+    expect(k({ alt: true, ctrl: true })).toBe("newline");
+    expect(k({ alt: true, shift: true })).toBe("newline");
+  });
+  it("leaves Shift+Enter and Enter on touch devices to the browser (newline)", () => {
+    expect(k({ shift: true })).toBe("default");
+    expect(k({ touch: true })).toBe("default");
+  });
+});
+
+describe("insertNewline", () => {
+  it("inserts at the caret or replaces the selection", () => {
+    expect(insertNewline("abcd", 2, 2)).toEqual({ text: "ab\ncd", caret: 3 });
+    expect(insertNewline("abcd", 1, 3)).toEqual({ text: "a\nd", caret: 2 });
+    expect(insertNewline("", 0, 0)).toEqual({ text: "\n", caret: 1 });
+    expect(insertNewline("ab", 2, 2)).toEqual({ text: "ab\n", caret: 3 });
   });
 });
