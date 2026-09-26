@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#1c1b19"/>
+  <!-- 小文字のtとして縦線の上の出を短くし（十字に見せない）、下端を右へ曲げて綱を留める輪につなげる -->
+  <path d="M214 128 V 318 C 214 372, 250 392, 296 392" fill="none" stroke="#f3efe8" stroke-width="46" stroke-linecap="round"/>
+  <path d="M152 196 H 300" fill="none" stroke="#f3efe8" stroke-width="46" stroke-linecap="round"/>
+  <circle cx="352" cy="360" r="50" fill="none" stroke="#d97757" stroke-width="34"/>
+</svg>

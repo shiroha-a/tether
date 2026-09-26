@@ -1,0 +1,6 @@
+/bin/
+/.tmp/
+web/node_modules/
+web/dist/*
+!web/dist/.keep
+/.serena/
