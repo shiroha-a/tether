@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
-import { neutralizeExternalImages } from "./markdown";
+import { externalLinksInNewTab, neutralizeExternalImages, renderMarkdown } from "./markdown";
 
 describe("neutralizeExternalImages", () => {
   it("turns remote images into links so nothing is fetched", () => {
@@ -30,5 +30,35 @@ describe("neutralizeExternalImages", () => {
     );
     expect(out).not.toContain("x.example");
     expect(out).toContain('src="/ok.png"');
+  });
+});
+
+describe("externalLinksInNewTab", () => {
+  it("opens links to other sites in a new tab without an opener", () => {
+    for (const href of ["https://example.com/a", "http://example.com", "//cdn.example/x", "mailto:a@example.com"]) {
+      const out = externalLinksInNewTab(`<p><a href="${href}">x</a></p>`);
+      expect(out, href).toContain('target="_blank"');
+      expect(out, href).toContain('rel="noopener noreferrer"');
+    }
+  });
+
+  it("leaves in-page and same-origin links alone", () => {
+    for (const html of [
+      '<a href="#">x</a>',
+      '<a class="file-link" href="#" data-path="/a.md">a.md</a>',
+      '<a href="/api/fs/download?path=%2Fa">x</a>',
+      '<a href="docs/a.md">x</a>',
+      "<a>no href</a>",
+    ]) {
+      expect(externalLinksInNewTab(html), html).not.toContain("target=");
+    }
+  });
+});
+
+describe("renderMarkdown", () => {
+  it("renders links from replies so they open in a new tab", () => {
+    const out = renderMarkdown("詳しくは[公式](https://example.com/docs)と<https://example.org>を参照");
+    expect(out.match(/target="_blank"/g)).toHaveLength(2);
+    expect(out.match(/rel="noopener noreferrer"/g)).toHaveLength(2);
   });
 });

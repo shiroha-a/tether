@@ -19,6 +19,13 @@ export function oscPreview(text: string): string {
   return lines > 1 ? `${head}（${lines}行）` : head;
 }
 
+/** Opens an http(s) URL from terminal output in a new tab; other schemes are ignored. */
+export function openInNewTab(uri: string): boolean {
+  if (!/^https?:\/\//i.test(uri)) return false;
+  window.open(uri, "_blank", "noopener,noreferrer");
+  return true;
+}
+
 /** A short message above the key bar; `pending` is text the user can copy with a tap. */
 interface ClipNotice {
   message: string;
@@ -110,10 +117,12 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
       cursorBlink: true,
       macOptionIsMeta: true,
       theme,
+      // 出力に埋め込まれたリンク（OSC 8）。既定では確認ダイアログが出るので、http/httpsはそのまま新しいタブで開く
+      linkHandler: { activate: (_e, uri) => openInNewTab(uri) },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri, "_blank", "noopener")));
+    term.loadAddon(new WebLinksAddon((_e, uri) => openInNewTab(uri)));
     term.open(host);
     termRef.current = term;
 

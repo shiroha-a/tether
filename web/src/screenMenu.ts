@@ -10,7 +10,16 @@ export interface MenuOption {
 
 export interface Menu {
   question: string;
+  /** What the menu is about (tool, command or file), from the panel above the question. */
+  context: string[];
   options: MenuOption[];
+}
+
+/** What the chat view needs from the terminal screen. */
+export interface ScreenState {
+  menu: Menu | null;
+  /** Claude Code is working (its status line offers "esc to interrupt"); only meaningful without a menu. */
+  busy: boolean;
 }
 
 // 選択メニューの下に出る操作の案内（許可確認、信頼確認、AskUserQuestion等）
@@ -19,6 +28,13 @@ const FOOTER = /(esc to (cancel|exit|go back)|enter to (confirm|select|continue|
 const DIVIDER = /^[\s─━╌═┄┈\-│┃╭╮╰╯┌┐└┘·]*$/;
 const MARKER = "❯";
 const NUMBER = /^\d+\.\s+/;
+
+// 許可確認の枠の上端（端末幅いっぱいの罫線）
+const BORDER = /^\s*─{8,}\s*$/;
+const BUSY = /esc to interrupt/i;
+const MAX_CONTEXT = 8;
+// 枠の上端を探す範囲（ツールの内容が長いと枠は画面外に出ているので、そのときは内容を出さない）
+const CONTEXT_SEARCH = 30;
 
 const indentOf = (s: string) => s.length - s.trimStart().length;
 
@@ -94,7 +110,36 @@ export function parseMenu(screen: string[], cols?: number): Menu | null {
   );
   // フッターがない場合は、入力欄の「❯」等の誤検出を避けるため番号付きのメニューだけを認める
   if (footer < 0 && !numbered) return null;
-  return { question: question.join(" ").trim(), options };
+  return { question: question.join(" ").trim(), context: contextAbove(lines, top), options };
+}
+
+/**
+ * Lines of the permission panel between its top border and the menu block
+ * starting at `top` (the tool, the command or file and its description).
+ * Returns [] when no border is found, so ordinary output is never shown as context.
+ */
+function contextAbove(lines: string[], top: number): string[] {
+  const found: string[] = [];
+  for (let i = top - 1; i >= Math.max(0, top - CONTEXT_SEARCH); i--) {
+    const line = lines[i];
+    if (BORDER.test(line)) {
+      const body = found.reverse();
+      const indent = Math.min(...body.map(indentOf));
+      const out = body.map((l) => l.slice(indent));
+      return out.length > MAX_CONTEXT ? [...out.slice(0, MAX_CONTEXT - 1), "…"] : out;
+    }
+    // 空行と、差分の区切り（╌）などの罫線だけの行は飛ばす
+    if (line !== "" && !DIVIDER.test(line)) found.push(line);
+  }
+  return [];
+}
+
+/** Reads the menu and whether Claude Code is busy from the visible screen. */
+export function parseScreen(screen: string[], cols?: number): ScreenState {
+  const menu = parseMenu(screen, cols);
+  // 作業中の表示は画面の下の方（入力欄の下のステータス行）に出る
+  const tail = screen.filter((l) => l.trim() !== "").slice(-4);
+  return { menu, busy: tail.some((l) => BUSY.test(l)) };
 }
 
 /** Keys that move the cursor from the selected option to the target and confirm it. */

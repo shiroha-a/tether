@@ -28,7 +28,19 @@ export function neutralizeExternalImages(html: string): string {
   return doc.body.innerHTML;
 }
 
+/** Makes links to other sites open in a new tab, without access to this page. */
+export function externalLinksInNewTab(html: string): string {
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
+  for (const a of doc.querySelectorAll("a[href]")) {
+    // 同じタブで開くと、PWAではアプリに戻れなくなる
+    if (!EXTERNAL.test(a.getAttribute("href") ?? "")) continue;
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer");
+  }
+  return doc.body.innerHTML;
+}
+
 /** Renders untrusted Markdown to safe HTML without remote resource loads. */
 export function renderMarkdown(text: string): string {
-  return neutralizeExternalImages(DOMPurify.sanitize(marked.parse(text, { async: false })));
+  return externalLinksInNewTab(neutralizeExternalImages(DOMPurify.sanitize(marked.parse(text, { async: false }))));
 }

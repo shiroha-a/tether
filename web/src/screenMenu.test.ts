@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { keysToChoose, parseMenu } from "./screenMenu";
+import { keysToChoose, parseMenu, parseScreen } from "./screenMenu";
 // 実際のClaude Code（v2.1.280）の許可確認画面をそのまま保存したもの
 import permissionScreen from "./testdata/permission-prompt.txt?raw";
+// Bashの許可確認と、許可したあとコマンドを実行している最中の画面（v2.1.280、幅84）
+import bashScreen from "./testdata/bash-permission.txt?raw";
+import runningScreen from "./testdata/bash-running.txt?raw";
 
 const permission = permissionScreen.split("\n");
+const bash = bashScreen.split("\n");
+const running = runningScreen.split("\n");
 
 describe("parseMenu", () => {
   it("reads the real permission prompt", () => {
@@ -18,6 +23,66 @@ describe("parseMenu", () => {
     ]);
     expect(menu!.options.map((o) => o.detail)).toEqual(["", "", ""]);
     expect(menu!.options.map((o) => o.selected)).toEqual([true, false, false]);
+  });
+
+  it("reads what a real Bash permission prompt is about", () => {
+    const menu = parseMenu(bash, 84)!;
+    expect(menu.question).toBe("Do you want to proceed?");
+    expect(menu.options.map((o) => [o.label, o.selected])).toEqual([
+      ["Yes", true],
+      ["No", false],
+    ]);
+    // 枠線から質問の手前まで。空行は除き、字下げは相対的に残す
+    expect(menu.context).toEqual([
+      "Bash command",
+      "  python3 -c 'import time; time.sleep(25)'; echo tether-$RANDOM",
+      "  実行ユーザーが指定したコマンドを実行",
+      "Contains simple_expansion",
+    ]);
+  });
+
+  it("reads the file of a real Write permission prompt, skipping diff dividers", () => {
+    expect(parseMenu(permission)!.context).toEqual(["Create file", "../../../../tmp/tether-menu-probe.txt", " 1 ok"]);
+  });
+
+  it("returns no context without a panel border, and caps long context", () => {
+    const menu = parseMenu(["● some output", "", " Pick one", " ❯ 1. A", "   2. B", " Esc to cancel"])!;
+    expect(menu.context).toEqual([]);
+    const long = [
+      "────────────",
+      ...Array.from({ length: 12 }, (_, i) => ` line ${i}`),
+      "",
+      " Go?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel",
+    ];
+    const ctx = parseMenu(long)!.context;
+    expect(ctx).toHaveLength(8);
+    expect(ctx.slice(0, 2)).toEqual(["line 0", "line 1"]);
+    expect(ctx[7]).toBe("…");
+    // ちょうど上限なら省略しない
+    const exact = [
+      "────────────",
+      ...Array.from({ length: 8 }, (_, i) => ` line ${i}`),
+      "",
+      " Go?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel",
+    ];
+    expect(parseMenu(exact)!.context).toEqual(Array.from({ length: 8 }, (_, i) => `line ${i}`));
+    // 枠線が探す範囲より上にあれば、関係のない出力を拾わないよう何も出さない
+    const far = [
+      "────────────",
+      ...Array.from({ length: 40 }, () => " x"),
+      "",
+      " Go?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel",
+    ];
+    expect(parseMenu(far)!.context).toEqual([]);
   });
 
   it("follows the cursor when another option is selected", () => {
@@ -129,5 +194,35 @@ describe("keysToChoose", () => {
     expect(keysToChoose(menu, 1)).toEqual(["enter"]);
     expect(keysToChoose(menu, 3)).toEqual(["down", "down", "enter"]);
     expect(keysToChoose(menu, 0)).toEqual(["up", "enter"]);
+  });
+});
+
+describe("parseScreen", () => {
+  it("reports busy while Claude Code runs a command, with no menu", () => {
+    expect(parseScreen(running, 84)).toEqual({ menu: null, busy: true });
+  });
+
+  it("is not busy while a menu is shown or when idle", () => {
+    const s = parseScreen(bash, 84);
+    expect(s.menu?.options).toHaveLength(2);
+    expect(s.busy).toBe(false);
+    const idle = ["● 完了しました。", "", "────────", "❯ ", "────────", "  ⏸ manual mode on · ← for agents"];
+    expect(parseScreen(idle)).toEqual({ menu: null, busy: false });
+  });
+
+  it("only looks at the bottom of the screen for the busy status", () => {
+    // 会話の本文に「esc to interrupt」と書かれていても作業中とはみなさない
+    const text = [
+      "● Press esc to interrupt a run.",
+      "",
+      "a",
+      "b",
+      "c",
+      "────────",
+      "❯ ",
+      "────────",
+      "  ⏸ manual mode on",
+    ];
+    expect(parseScreen(text).busy).toBe(false);
   });
 });
