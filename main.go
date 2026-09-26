@@ -28,6 +28,7 @@ import (
 	"tether/internal/schedule"
 	"tether/internal/server"
 	"tether/internal/session"
+	"tether/internal/snippets"
 	"tether/internal/usage"
 	"tether/web"
 )
@@ -129,6 +130,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	snips, err := snippets.New(cfg.DataDir)
+	if err != nil {
+		return err
+	}
 	sched.OnFire = func(it schedule.Item) {
 		hub.Publish(map[string]any{"type": "schedule.changed", "session": it.SessionID})
 		if it.Status == schedule.Failed {
@@ -145,7 +150,7 @@ func serve() error {
 	}
 	srv := &http.Server{
 		Handler: allow.Middleware(server.New(server.Deps{
-			Root: cfg.Root, Token: cfg.AuthToken(), Sessions: sessions, Hub: hub, Notifier: notifier, Scheduler: sched,
+			Root: cfg.Root, Token: cfg.AuthToken(), Sessions: sessions, Hub: hub, Notifier: notifier, Scheduler: sched, Snippets: snips,
 			Usage:        &usage.Client{CredentialsPath: filepath.Join(claudeDir, ".credentials.json"), Endpoint: usage.DefaultEndpoint, TTL: time.Minute},
 			Static:       static,
 			Hosts:        hosts,

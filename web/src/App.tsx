@@ -110,6 +110,7 @@ export default function App() {
   };
   const [scheduleFor, setScheduleFor] = useState<string | null>(null);
   const [scheduleVersion, setScheduleVersion] = useState(0);
+  const [snippetsVersion, setSnippetsVersion] = useState(0);
   const [drawer, setDrawer] = useState(false);
   const [permission, setPermission] = useState(notifyPermission);
   const [menu, setMenu] = useState(false);
@@ -175,6 +176,7 @@ export default function App() {
         if (typeof msg.type !== "string") return;
         if (msg.type.startsWith("session.")) refreshSessions();
         if (msg.type === "schedule.changed") setScheduleVersion((v) => v + 1);
+        if (msg.type === "snippets.changed") setSnippetsVersion((v) => v + 1);
         if (msg.type === "notify") {
           setNoticeVersion((v) => v + 1);
           const n = msg as Notice;
@@ -542,6 +544,7 @@ export default function App() {
                 fontSize={fontSize}
                 cwd={active.cwd}
                 onOpenPath={openPath}
+                snippetsVersion={snippetsVersion}
               />
             )
           ) : view === "browser" ? (

@@ -7,6 +7,7 @@ import { wsUrl } from "../api";
 import { bufferToText, copyText, decodeOsc52, readClipboard } from "../clipboard";
 import { extractPaths, type KnownPath } from "../paths";
 import { usePathLookup } from "../hooks/usePathLookup";
+import CommandSheet from "./CommandSheet";
 
 type ConnState = "connecting" | "open" | "closed";
 
@@ -33,6 +34,8 @@ interface Props {
   cwd: string;
   /** Opens a file preview (or the folder browser for directories). */
   onOpenPath: (p: KnownPath) => void;
+  /** Bumped when the saved commands change on the server. */
+  snippetsVersion: number;
 }
 
 const theme = {
@@ -72,7 +75,7 @@ const PINNED_KEYS: Key[] = [
  * by the server (smallest viewport among all clients), so this component
  * reports its own preferred size and renders at whatever size the server announces.
  */
-export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPath }: Props) {
+export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPath, snippetsVersion }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -83,6 +86,7 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
   const [draft, setDraft] = useState("");
   const [copySheet, setCopySheet] = useState<{ all: string; visible: string } | null>(null);
   const [clip, setClip] = useState<ClipNotice | null>(null);
+  const [commandsOpen, setCommandsOpen] = useState(false);
   const copyTextRef = useRef<HTMLPreElement>(null);
   // 出力に出てきたパスのリンク化。xtermのコールバックから最新の値を見られるようrefで渡す
   const lookup = usePathLookup(cwd);
@@ -346,6 +350,16 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
     setDraft("");
   };
 
+  const runCommand = (command: string) => {
+    const term = termRef.current;
+    if (!term) return;
+    // 入力欄の送信と同じく、貼り付けとして送ってから少し置いてEnterを送る
+    term.paste(command);
+    window.setTimeout(() => input("\r"), 120);
+    setCommandsOpen(false);
+    term.focus();
+  };
+
   return (
     <div className="term-wrap">
       <div className="term-host" ref={hostRef} onClick={() => termRef.current?.focus()} />
@@ -391,6 +405,14 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
           </div>
         </div>
       )}
+      {commandsOpen && (
+        <CommandSheet
+          version={snippetsVersion}
+          disabled={conn !== "open" || exited !== null}
+          onRun={runCommand}
+          onClose={() => setCommandsOpen(false)}
+        />
+      )}
       {clip && (
         <div className="clip-notice" role="status">
           <span>{clip.message}</span>
@@ -433,6 +455,16 @@ export default function TerminalView({ sessionId, shell, fontSize, cwd, onOpenPa
           >
             ✎
           </button>
+          {shell && (
+            <button
+              className={"key" + (commandsOpen ? " on" : "")}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setCommandsOpen((v) => !v)}
+              title="よく使うコマンド"
+            >
+              コマンド
+            </button>
+          )}
           <button className="key" onClick={openCopySheet} title="画面のテキストをコピー">
             コピー
           </button>
