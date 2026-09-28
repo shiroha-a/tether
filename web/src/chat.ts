@@ -1,4 +1,4 @@
-import type { ChatItem } from "./api";
+import type { ChatItem, Hunk, Todo } from "./api";
 
 /** A row in the chat view. Tool calls carry their result once it arrives. */
 export type ChatEntry = { type: "message"; item: ChatItem } | { type: "tool"; use: ChatItem; result?: ChatItem };
@@ -41,7 +41,10 @@ export type ToolGroup = {
   tools: ToolEntry[];
 };
 
-export type DisplayEntry = ChatEntry | ToolGroup;
+/** Consecutive notifications from the same background task shown as one card. */
+export type EventGroup = { type: "events"; id: string; items: ChatItem[] };
+
+export type DisplayEntry = ChatEntry | ToolGroup | EventGroup;
 
 const isThinking = (e: ChatEntry): e is ThinkingEntry => e.type === "message" && e.item.kind === "thinking";
 
@@ -49,8 +52,8 @@ const isThinking = (e: ChatEntry): e is ThinkingEntry => e.type === "message" &&
  * Collapses runs of two or more tool calls into one group. Thinking between
  * the calls belongs to the run; a message from the user or Claude ends it.
  */
-export function groupTools(entries: ChatEntry[]): DisplayEntry[] {
-  const out: DisplayEntry[] = [];
+export function groupTools(entries: ChatEntry[]): (ChatEntry | ToolGroup)[] {
+  const out: (ChatEntry | ToolGroup)[] = [];
   let run: (ToolEntry | ThinkingEntry)[] = [];
   const flush = () => {
     // 末尾の思考は次の返答の前置きなので、まとまりには含めず個別に出す
@@ -104,4 +107,200 @@ export function enterAction(k: {
 /** Replaces the selection with a newline and returns the new text and caret position. */
 export function insertNewline(text: string, start: number, end: number): { text: string; caret: number } {
   return { text: text.slice(0, start) + "\n" + text.slice(end), caret: start + 1 };
+}
+
+/**
+ * Rebuilds Claude Code's task list from the loaded items, the same way Claude
+ * Code does: TaskCreate gets its number from the result ("Task #N created"),
+ * TaskUpdate changes or deletes a task, and TodoWrite replaces the whole list.
+ */
+export function buildTasks(items: ChatItem[]): Todo[] {
+  let tasks = new Map<string, Todo>();
+  const creating = new Map<string, Todo>();
+  for (const it of items) {
+    if (it.kind === "tool_use" && it.toolName === "TodoWrite" && it.todos) {
+      tasks = new Map(it.todos.map((t, i) => [String(i), { ...t, id: String(i + 1) }]));
+    } else if (it.kind === "tool_use" && it.toolName === "TaskCreate" && it.task && it.toolId) {
+      creating.set(it.toolId, it.task);
+    } else if (it.kind === "tool_result" && it.toolId && it.taskId && creating.has(it.toolId)) {
+      tasks.set(it.taskId, { ...creating.get(it.toolId), id: it.taskId });
+      creating.delete(it.toolId);
+    } else if (it.kind === "tool_use" && it.toolName === "TaskUpdate" && it.task?.id) {
+      const { id, status, content, activeForm } = it.task;
+      const cur = tasks.get(id);
+      if (!cur) continue;
+      if (status === "deleted") tasks.delete(id);
+      else
+        tasks.set(id, {
+          ...cur,
+          ...(status ? { status } : {}),
+          ...(content ? { content } : {}),
+          ...(activeForm ? { activeForm } : {}),
+        });
+    }
+  }
+  return [...tasks.values()];
+}
+
+export type BackgroundKind = "shell" | "agent" | "monitor";
+export type BackgroundState = "running" | "completed" | "failed" | "stopped";
+
+/** A shell, agent or monitor that Claude started and that may still be running. */
+export interface BackgroundTask {
+  /** tool_use id of the call that started it. */
+  toolId: string;
+  kind: BackgroundKind;
+  description: string;
+  /** Id Claude Code assigned (known once the call returns). */
+  taskId?: string;
+  startedAt: string;
+  state: BackgroundState;
+  /** Latest summary from a task notification. */
+  summary?: string;
+}
+
+const AGENT_TOOLS = new Set(["Agent", "Task"]);
+
+function eventState(status: string | undefined): BackgroundState | undefined {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "killed":
+    case "stopped":
+      return "stopped";
+  }
+  // Monitorのイベント通知は状態を持たず、監視は続いている
+  return undefined;
+}
+
+/** Monitor reports its timeout as an event without a status. */
+const MONITOR_EXPIRED = /^\[Monitor expired/;
+
+/**
+ * Lists the background work found in the loaded items: background shells and
+ * monitors, and agents (background ones, and foreground ones until they
+ * return). Completion comes from task notifications, TaskStop, or for
+ * foreground agents their result.
+ */
+export function buildBackground(items: ChatItem[]): BackgroundTask[] {
+  const byTool = new Map<string, BackgroundTask>();
+  const byTask = new Map<string, BackgroundTask>();
+  const stopping = new Map<string, string>();
+  const foreground = new Set<string>();
+  for (const it of items) {
+    if (it.kind === "tool_use" && it.toolId) {
+      const agent = AGENT_TOOLS.has(it.toolName ?? "");
+      if (agent || it.background) {
+        byTool.set(it.toolId, {
+          toolId: it.toolId,
+          kind: agent ? "agent" : it.toolName === "Monitor" ? "monitor" : "shell",
+          description: it.summary || it.toolName || "",
+          startedAt: it.at,
+          state: "running",
+        });
+        if (agent && !it.background) foreground.add(it.toolId);
+      }
+      if (it.toolName === "TaskStop" && it.taskId) stopping.set(it.toolId, it.taskId);
+      continue;
+    }
+    if (it.kind === "tool_result" && it.toolId) {
+      const t = byTool.get(it.toolId);
+      if (t) {
+        if (it.taskId) {
+          t.taskId = it.taskId;
+          byTask.set(it.taskId, t);
+        }
+        // 前面で動くエージェントは結果が返ったら終わり。起動に失敗したものも終わり
+        if (it.isError) t.state = "failed";
+        else if (foreground.has(it.toolId)) t.state = "completed";
+      }
+      const stopped = stopping.get(it.toolId);
+      if (stopped && !it.isError) {
+        const target = byTask.get(stopped);
+        if (target) target.state = "stopped";
+      }
+      continue;
+    }
+    if (it.kind === "task_event") {
+      const t = (it.taskId && byTask.get(it.taskId)) || (it.toolId && byTool.get(it.toolId)) || undefined;
+      if (!t) continue;
+      t.state = eventState(it.status) ?? (MONITOR_EXPIRED.test(it.text ?? "") ? "completed" : t.state);
+      if (it.summary) t.summary = it.summary;
+    }
+  }
+  return [...byTool.values()];
+}
+
+/** One line of a diff with its line numbers (when the hunk position is known). */
+export interface DiffRow {
+  type: "add" | "del" | "ctx";
+  text: string;
+  oldNo?: number;
+  newNo?: number;
+}
+
+/** Splits a hunk into rows and numbers them from the hunk's start lines. */
+export function diffRows(h: Hunk): DiffRow[] {
+  let oldNo = h.oldStart;
+  let newNo = h.newStart;
+  return h.lines.map((line) => {
+    const text = line.slice(1);
+    if (line.startsWith("+")) return { type: "add", text, newNo: newNo > 0 ? newNo++ : undefined };
+    if (line.startsWith("-")) return { type: "del", text, oldNo: oldNo > 0 ? oldNo++ : undefined };
+    return {
+      type: "ctx",
+      text,
+      oldNo: oldNo > 0 ? oldNo++ : undefined,
+      newNo: newNo > 0 ? newNo++ : undefined,
+    };
+  });
+}
+
+/** Time since start in a short Japanese form, e.g. "45秒", "12分", "1時間5分". */
+export function elapsed(startIso: string, now: number): string {
+  const sec = Math.max(0, Math.floor((now - new Date(startIso).getTime()) / 1000));
+  if (Number.isNaN(sec)) return "";
+  if (sec < 60) return `${sec}秒`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分`;
+  return `${Math.floor(min / 60)}時間${min % 60}分`;
+}
+
+/** What a tool card shows as its one-line summary. */
+export function toolSummary(use: ChatItem): string {
+  if (use.toolName === "TaskCreate" && use.task?.content) return use.task.content;
+  if (use.toolName === "TaskUpdate" && use.task?.id) {
+    const change = use.task.status ?? use.task.content ?? "";
+    return `#${use.task.id} ${change}`.trim();
+  }
+  if (use.toolName === "TodoWrite" && use.todos) {
+    const done = use.todos.filter((t) => t.status === "completed").length;
+    return `${done}/${use.todos.length}`;
+  }
+  return use.summary ?? "";
+}
+
+/**
+ * Merges runs of notifications from the same background task (a monitor
+ * reports every event separately) into one entry.
+ */
+export function groupEvents(entries: DisplayEntry[]): DisplayEntry[] {
+  const out: DisplayEntry[] = [];
+  for (const e of entries) {
+    const prev = out[out.length - 1];
+    if (e.type === "message" && e.item.kind === "task_event" && e.item.taskId) {
+      if (prev?.type === "events" && prev.items[0].taskId === e.item.taskId) {
+        prev.items.push(e.item);
+        continue;
+      }
+      if (prev?.type === "message" && prev.item.kind === "task_event" && prev.item.taskId === e.item.taskId) {
+        out[out.length - 1] = { type: "events", id: "events:" + prev.item.id, items: [prev.item, e.item] };
+        continue;
+      }
+    }
+    out.push(e);
+  }
+  return out;
 }

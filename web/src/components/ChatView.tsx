@@ -1,15 +1,27 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { api, type Activity, type ChatItem, type InputKey } from "../api";
+import { api, type Activity, type AgentProgress, type ChatItem, type InputKey } from "../api";
 import {
+  buildBackground,
   buildEntries,
+  buildTasks,
   enterAction,
+  groupEvents,
   groupTools,
   insertNewline,
   mergeItems,
   toolBreakdown,
+  toolSummary,
   type ChatEntry,
   type ToolGroup,
 } from "../chat";
+import {
+  AttachmentStrip,
+  ChatStatusBar,
+  DiffView,
+  TaskChecklist,
+  TranscriptImages,
+  type Attachment,
+} from "./ChatParts";
 import { useScreenMenu } from "../hooks/useScreenMenu";
 import { keysToChoose } from "../screenMenu";
 import { renderMarkdown } from "../markdown";
@@ -30,6 +42,10 @@ interface Props {
 }
 
 const POLL_MS = 1500;
+/** How often the progress of running subagents is refreshed. */
+const AGENT_POLL_MS = 5000;
+/** How many images one message may carry (mirrors the server limit). */
+const MAX_ATTACHMENTS = 10;
 
 /** Keys offered while Claude Code waits for a choice (permission prompts, menus). */
 const CHOICE_KEYS: { key: InputKey; label: string }[] = [
@@ -56,28 +72,77 @@ function toolState(t: ToolEntry): ToolState {
   return !t.result ? "running" : t.result.isError ? "error" : "done";
 }
 
-type Paths = { known: Map<string, KnownPath>; onOpen: (p: KnownPath) => void };
+type Paths = { known: Map<string, KnownPath>; onOpen: (p: KnownPath) => void; sessionId: string };
 
 function ToolCard({ t, paths }: { t: ToolEntry; paths: Paths }) {
   const state = toolState(t);
+  // 適用された差分（結果）があればそれを、まだ結果がなければ入力から作った差分を出す
+  const patch = t.result?.patch ?? t.use.patch;
+  const todos = t.use.todos ?? (t.use.task ? [t.use.task] : undefined);
+  const input = (
+    <pre className="tool-io">
+      <PathText text={t.use.text ?? ""} {...paths} />
+    </pre>
+  );
   return (
     <details className={"chat-tool " + state}>
       <summary>
         <span className="tool-name">{t.use.toolName}</span>
         <span className="tool-summary">
-          <PathText text={t.use.summary ?? ""} {...paths} />
+          <PathText text={toolSummary(t.use)} {...paths} />
         </span>
         <span className="tool-state">{STATE_LABEL[state]}</span>
       </summary>
-      <pre className="tool-io">
-        <PathText text={t.use.text ?? ""} {...paths} />
-      </pre>
-      {t.result && (
+      {patch || todos ? (
+        <>
+          {patch && <DiffView patch={patch} />}
+          {!patch && todos && <TaskChecklist tasks={todos} />}
+          {(patch ? (t.result ?? t.use) : t.use).truncated && <p className="tool-note muted">…（長いので省略）</p>}
+          <details className="tool-raw">
+            <summary>入力</summary>
+            {input}
+          </details>
+        </>
+      ) : (
+        input
+      )}
+      {t.result && !(patch && !t.result.isError) && (
         <pre className={"tool-io result" + (t.result.isError ? " error" : "")}>
           {t.result.text ? <PathText text={t.result.text} {...paths} /> : "（出力なし）"}
           {t.result.truncated && "\n…（省略）"}
         </pre>
       )}
+      {t.result?.images && <TranscriptImages sessionId={paths.sessionId} refs={t.result.images} />}
+    </details>
+  );
+}
+
+function EventBody({ item, known }: { item: ChatItem; known: Map<string, KnownPath> }) {
+  if (!item.text) return null;
+  // Monitorのイベントはコマンドの出力なので、Markdownとして整形せずそのまま出す
+  return (
+    <div className="chat-event-body">
+      {item.plain ? <pre className="chat-event-plain">{item.text}</pre> : <Markdown text={item.text} known={known} />}
+    </div>
+  );
+}
+
+/**
+ * Notifications from a background shell, agent or monitor. Several events of
+ * the same task (a monitor reports each one) share a card.
+ */
+function TaskEvent({ items, known }: { items: ChatItem[]; known: Map<string, KnownPath> }) {
+  const last = items[items.length - 1];
+  const state = last.status === "completed" ? "done" : last.status === "failed" ? "error" : "";
+  return (
+    <details className={"chat-tool chat-event " + state}>
+      <summary>
+        <span className="tool-name">{items.length > 1 ? `通知 ${items.length}件` : "通知"}</span>
+        <span className="tool-summary">{last.summary || last.status || "バックグラウンドの処理"}</span>
+      </summary>
+      {items.map((it) => (
+        <EventBody key={it.id} item={it} known={known} />
+      ))}
     </details>
   );
 }
@@ -146,6 +211,11 @@ export default function ChatView({
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [agentProgress, setAgentProgress] = useState<Map<string, AgentProgress>>(new Map());
+  // 仮表示を消す目安。送信時点のユーザー発言の数より増えたら、送った発言が記録に現れたとみなす
+  const pendingUsersRef = useRef(0);
+  const fileRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Alt+Enterで改行を入れた後のカーソル位置。値を差し替えるとカーソルが末尾に移るので、描画直後に戻す
@@ -199,10 +269,45 @@ export default function ChatView({
     };
   }, [sessionId]);
 
-  // 送信した発言が記録に現れたら、仮表示を消す
+  // 送信した発言が記録に現れたら、仮表示を消す。画像を付けると記録の文章が変わる（[Image #1]等）ので、文章ではなく数で見る
+  const userCount = useMemo(() => items.filter((i) => i.kind === "user").length, [items]);
   useEffect(() => {
-    if (pending && items.some((i) => i.kind === "user" && i.text?.trim() === pending.trim())) setPending(null);
-  }, [items, pending]);
+    if (pending !== null && userCount > pendingUsersRef.current) setPending(null);
+  }, [userCount, pending]);
+
+  const tasks = useMemo(() => buildTasks(items), [items]);
+  // Claude Codeが止まっていれば、バックグラウンドの処理も一緒に終わっている（完了通知が記録に残らないことがある）
+  const background = useMemo(() => (running ? buildBackground(items) : []), [items, running]);
+  // 動いているエージェントの進み具合（最新のツールと回数）を、サブエージェントの記録から読む
+  const runningAgents = useMemo(
+    () =>
+      background
+        .filter((b) => b.kind === "agent" && b.state === "running")
+        .map((b) => b.toolId)
+        .join(","),
+    [background],
+  );
+  useEffect(() => {
+    if (!runningAgents) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const list = await api.agents(sessionId, runningAgents.split(","));
+          if (!stopped) setAgentProgress(new Map(list.filter((a) => a.toolUseId).map((a) => [a.toolUseId!, a])));
+        } catch {
+          // 進み具合は補助的な表示なので、取れなくても何もしない
+        }
+      }
+      if (!stopped) timer = window.setTimeout(poll, AGENT_POLL_MS);
+    };
+    poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [sessionId, runningAgents]);
 
   // 一番下を見ているときだけ、新しい発言に合わせて追従スクロールする
   useLayoutEffect(() => {
@@ -215,14 +320,14 @@ export default function ChatView({
     if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  const entries = useMemo(() => groupTools(buildEntries(items)), [items]);
+  const entries = useMemo(() => groupEvents(groupTools(buildEntries(items))), [items]);
 
   // 発言やツールの入出力に出てきたパスを、実在するものだけリンクにする
   const { known, request } = usePathLookup(cwd);
   useEffect(() => {
     request(collectPaths(items.flatMap((i) => [i.text, i.summary])));
   }, [items, request]);
-  const paths: Paths = useMemo(() => ({ known, onOpen: onOpenPath }), [known, onOpenPath]);
+  const paths: Paths = useMemo(() => ({ known, onOpen: onOpenPath, sessionId }), [known, onOpenPath, sessionId]);
 
   // Markdownの中に差し込んだリンク（a.file-link）は、ここでまとめて受ける
   const onListClick = (e: MouseEvent) => {
@@ -234,20 +339,51 @@ export default function ChatView({
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    if ((!text && attachments.length === 0) || sending) return;
     setSending(true);
     setError("");
     stickRef.current = true;
-    setPending(text);
+    pendingUsersRef.current = userCount;
+    setPending(attachments.length > 0 ? `${text}${text ? "\n" : ""}（画像${attachments.length}枚）` : text);
     try {
-      await api.sendText(sessionId, text);
+      const ids: string[] = [];
+      for (const a of attachments) ids.push((await api.uploadImage(sessionId, a.file, a.file.name)).id);
+      await api.sendText(sessionId, text, ids);
       setDraft("");
+      clearAttachments();
     } catch (e) {
       setPending(null);
       setError((e as Error).message);
     } finally {
       setSending(false);
     }
+  };
+
+  const addFiles = (files: Iterable<File>) => {
+    const images = [...files].filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    setAttachments((cur) =>
+      [...cur, ...images.map((file) => ({ file, url: URL.createObjectURL(file) }))].slice(0, MAX_ATTACHMENTS),
+    );
+  };
+  const removeAttachment = (i: number) =>
+    setAttachments((cur) => {
+      URL.revokeObjectURL(cur[i].url);
+      return cur.filter((_, j) => j !== i);
+    });
+  const clearAttachments = () =>
+    setAttachments((cur) => {
+      cur.forEach((a) => URL.revokeObjectURL(a.url));
+      return [];
+    });
+  // セッションを切り替えたら、添付は持ち越さない
+  useEffect(() => clearAttachments, [sessionId]);
+
+  // 作業中（通知の状態か、画面にesc to interruptが出ている）はEscで止められるようにする
+  const working = running && (activity === "working" || busy);
+  const stop = () => {
+    setError("");
+    sendKey("esc");
   };
 
   const sendKey = (key: InputKey) => api.sendKey(sessionId, key).catch((e) => setError((e as Error).message));
@@ -269,6 +405,7 @@ export default function ChatView({
 
   return (
     <div className="chat">
+      <ChatStatusBar tasks={tasks} background={background} agents={agentProgress} />
       <div className="chat-list" ref={listRef} onScroll={onScroll} onClick={onListClick}>
         {truncated && <p className="chat-chip muted">以前の会話は省略しています（全体はターミナルで確認できます）</p>}
         {loaded && entries.length === 0 && !pending && (
@@ -276,6 +413,7 @@ export default function ChatView({
         )}
         {entries.map((e) => {
           if (e.type === "group") return <ToolGroupCard key={e.id} g={e} paths={paths} />;
+          if (e.type === "events") return <TaskEvent key={e.id} items={e.items} known={known} />;
           if (e.type === "tool") return <ToolCard key={e.use.id} t={e} paths={paths} />;
           const it = e.item;
           switch (it.kind) {
@@ -283,9 +421,12 @@ export default function ChatView({
               return (
                 <div key={it.id} className="chat-row me">
                   <div className="bubble user">
-                    <p className="plain">
-                      <PathText text={it.text ?? ""} {...paths} />
-                    </p>
+                    {it.images && <TranscriptImages sessionId={sessionId} refs={it.images} />}
+                    {it.text && (
+                      <p className="plain">
+                        <PathText text={it.text} {...paths} />
+                      </p>
+                    )}
                     <span className="chat-time">{time(it.at)}</span>
                   </div>
                 </div>
@@ -301,6 +442,15 @@ export default function ChatView({
               );
             case "thinking":
               return <Thinking key={it.id} item={it} />;
+            case "summary":
+              return (
+                <details key={it.id} className="chat-thinking chat-summary">
+                  <summary>会話を要約しました（compact）</summary>
+                  <p className="plain">{it.text}</p>
+                </details>
+              );
+            case "task_event":
+              return <TaskEvent key={it.id} items={[it]} known={known} />;
             default:
               return (
                 <p key={it.id} className="chat-chip">
@@ -388,13 +538,50 @@ export default function ChatView({
       )}
 
       {error && <p className="error chat-error">{error}</p>}
+      <AttachmentStrip items={attachments} onRemove={removeAttachment} />
       <div className="chat-input">
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          hidden
+          onChange={(e) => {
+            if (e.target.files) addFiles(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button
+          className="icon-btn"
+          aria-label="画像を添付"
+          title="画像を添付"
+          disabled={attachments.length >= MAX_ATTACHMENTS}
+          onClick={() => fileRef.current?.click()}
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M21 12.5l-8.4 8.4a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"
+            />
+          </svg>
+        </button>
         <textarea
           ref={inputRef}
           value={draft}
           rows={1}
           placeholder={isTouch ? "メッセージを入力" : "メッセージを入力（Enterで送信、Shift+EnterかAlt+Enterで改行）"}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            // クリップボードの画像（スクリーンショット等）は添付にする。文字も一緒なら文字は通常どおり貼る
+            const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+            if (files.length === 0) return;
+            if (!e.clipboardData.getData("text/plain")) e.preventDefault();
+            addFiles(files);
+          }}
           onKeyDown={(e) => {
             if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
             const action = enterAction({
@@ -416,7 +603,16 @@ export default function ChatView({
             setDraft(next.text);
           }}
         />
-        <button className="btn primary" onClick={send} disabled={!draft.trim() || sending}>
+        {working && (
+          <button className="btn danger" onClick={stop} title="Escを送って作業を止めます">
+            停止
+          </button>
+        )}
+        <button
+          className="btn primary"
+          onClick={send}
+          disabled={(!draft.trim() && attachments.length === 0) || sending}
+        >
           送信
         </button>
       </div>

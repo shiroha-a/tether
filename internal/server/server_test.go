@@ -43,6 +43,8 @@ type env struct {
 	broker *peer.Broker
 	// transcripts maps claude session ids to transcript files for the chat API.
 	transcripts map[string]string
+	// uploads is where images attached in the chat view are stored.
+	uploads string
 }
 
 func newEnv(t *testing.T) *env {
@@ -70,13 +72,14 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	peerAudit, _ := peer.NewAudit(data, 100)
-	e := &env{root: root, m: m, hub: hub, transcripts: map[string]string{}, broker: peer.NewBroker(time.Minute)}
+	e := &env{root: root, m: m, hub: hub, transcripts: map[string]string{}, broker: peer.NewBroker(time.Minute), uploads: filepath.Join(data, "uploads")}
 	s := New(Deps{
 		Transcripts: func(id string) (string, bool) {
 			p, ok := e.transcripts[id]
 			return p, ok
 		},
-		Root: root, Token: token, Sessions: m, Hub: hub,
+		UploadDir: e.uploads,
+		Root:      root, Token: token, Sessions: m, Hub: hub,
 		Notifier:   &events.Notifier{Hub: hub, Sessions: m},
 		Scheduler:  sched,
 		Snippets:   snips,

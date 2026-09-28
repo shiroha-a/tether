@@ -43,6 +43,8 @@ type Server struct {
 	hosts     *guard.Hosts
 	// transcripts locates Claude Code transcript files by conversation id.
 	transcripts  func(claudeSessionID string) (string, bool)
+	agents       transcript.AgentReader
+	uploadDir    string
 	startupDelay time.Duration
 	enterDelay   time.Duration
 	version      string
@@ -74,6 +76,8 @@ type Deps struct {
 	Hosts *guard.Hosts
 	// Transcripts locates Claude Code transcript files; nil disables the chat view.
 	Transcripts func(claudeSessionID string) (string, bool)
+	// UploadDir holds images attached in the chat view; empty disables attaching.
+	UploadDir string
 	// StartupDelay is how long to wait after resuming a stopped session before
 	// sending input (Claude Code drops keystrokes while its TUI starts).
 	StartupDelay time.Duration
@@ -96,7 +100,7 @@ func New(d Deps) *Server {
 	s := &Server{
 		root: d.Root, token: d.Token, sessions: d.Sessions, hub: d.Hub, notifier: d.Notifier,
 		scheduler: d.Scheduler, snippets: d.Snippets, usage: d.Usage, static: d.Static, hosts: d.Hosts,
-		transcripts: d.Transcripts, startupDelay: d.StartupDelay, enterDelay: 300 * time.Millisecond,
+		transcripts: d.Transcripts, uploadDir: d.UploadDir, startupDelay: d.StartupDelay, enterDelay: 300 * time.Millisecond,
 		version: cmp.Or(d.Version, "dev"), repository: d.Repository, startedAt: time.Now(),
 	}
 	if d.Peers != nil {
@@ -126,6 +130,11 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/sessions/{id}", s.deleteSession)
 	api.HandleFunc("GET /api/sessions/{id}/transcript", s.transcript)
 	api.HandleFunc("POST /api/sessions/{id}/input", s.sessionInput)
+	api.HandleFunc("GET /api/sessions/{id}/transcript/image", s.transcriptImage)
+	api.HandleFunc("GET /api/sessions/{id}/agents", s.sessionAgents)
+	if s.uploadDir != "" {
+		api.HandleFunc("POST /api/sessions/{id}/images", s.uploadImage)
+	}
 	api.HandleFunc("GET /api/schedules", s.listSchedules)
 	api.HandleFunc("POST /api/schedules", s.createSchedule)
 	api.HandleFunc("DELETE /api/schedules/{id}", s.deleteSchedule)
@@ -488,6 +497,8 @@ func (s *Server) sessionInput(w http.ResponseWriter, r *http.Request) {
 		Text string   `json:"text"`
 		Key  string   `json:"key"`
 		Keys []string `json:"keys"`
+		// Images are ids returned by the image upload, attached before the text.
+		Images []string `json:"images"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -512,11 +523,20 @@ func (s *Server) sessionInput(w http.ResponseWriter, r *http.Request) {
 		seqs = append(seqs, seq)
 	}
 	isKey := len(seqs) > 0
-	if !isKey && strings.TrimSpace(text) == "" {
+	if isKey && len(body.Images) > 0 {
+		http.Error(w, "images cannot be sent with keys", http.StatusBadRequest)
+		return
+	}
+	if !isKey && strings.TrimSpace(text) == "" && len(body.Images) == 0 {
 		http.Error(w, "text or key is required", http.StatusBadRequest)
 		return
 	}
 	id := r.PathValue("id")
+	images, err := s.uploadedImages(id, body.Images)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	sess, err := s.sessions.Get(id)
 	if sessionErr(w, err) {
 		return
@@ -539,15 +559,32 @@ func (s *Server) sessionInput(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-	} else if err = sess.Write(schedule.EncodePrompt(text)); err == nil {
-		time.Sleep(s.enterDelay)
-		err = sess.Write([]byte("\r"))
+	} else {
+		err = s.writePrompt(sess, text, images)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writePrompt types a prompt into the TUI and submits it.
+func (s *Server) writePrompt(sess *session.Session, text string, images []string) error {
+	// 画像はパスだけを1つずつ貼ると添付になる（文章とまとめて貼ると、ただの文字列として扱われる）
+	for _, p := range images {
+		if err := sess.Write([]byte("\x1b[200~" + p + "\x1b[201~")); err != nil {
+			return err
+		}
+		time.Sleep(s.enterDelay)
+	}
+	if strings.TrimSpace(text) != "" {
+		if err := sess.Write(schedule.EncodePrompt(text)); err != nil {
+			return err
+		}
+		time.Sleep(s.enterDelay)
+	}
+	return sess.Write([]byte("\r"))
 }
 
 // sessionErr writes an error response and reports whether err was non-nil.

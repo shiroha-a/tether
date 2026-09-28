@@ -98,7 +98,42 @@ export function isShell(s: Pick<SessionStatus, "kind">): boolean {
   return s.kind === "shell";
 }
 
-export type ChatKind = "user" | "assistant" | "thinking" | "tool_use" | "tool_result" | "command" | "note";
+export type ChatKind =
+  "user" | "assistant" | "thinking" | "tool_use" | "tool_result" | "command" | "note" | "summary" | "task_event";
+
+/** One block of a unified diff. Lines start with " ", "+" or "-"; starts are 0 when unknown. */
+export interface Hunk {
+  oldStart: number;
+  newStart: number;
+  lines: string[];
+}
+
+/** One entry of Claude Code's task list (TaskCreate/TaskUpdate/TodoWrite). */
+export interface Todo {
+  id?: string;
+  content?: string;
+  activeForm?: string;
+  status?: string;
+}
+
+/** Position of an image block in the transcript (see GET /transcript/image). */
+export interface ImageRef {
+  line: number;
+  index: number;
+  sub: number;
+}
+
+/** Progress of a subagent, read from its own transcript. */
+export interface AgentProgress {
+  agentId: string;
+  description?: string;
+  agentType?: string;
+  toolUseId?: string;
+  toolCount: number;
+  lastTool?: string;
+  lastSummary?: string;
+  lastAt: string;
+}
 
 /** One normalized transcript element (see internal/transcript). */
 export interface ChatItem {
@@ -111,6 +146,21 @@ export interface ChatItem {
   isError?: boolean;
   truncated?: boolean;
   at: string;
+  /** Change made by Edit/MultiEdit/Write. */
+  patch?: Hunk[];
+  /** Full list sent by TodoWrite. */
+  todos?: Todo[];
+  /** Task created or changed by TaskCreate/TaskUpdate. */
+  task?: Todo;
+  /** Background task id (tool_result, TaskStop's tool_use, task_event). */
+  taskId?: string;
+  /** Tool call that keeps running after it returns. */
+  background?: boolean;
+  /** State reported by a task_event. */
+  status?: string;
+  images?: ImageRef[];
+  /** Text is raw output (monitor events) rather than Markdown. */
+  plain?: boolean;
 }
 
 export interface TranscriptChunk {
@@ -317,7 +367,17 @@ export const api = {
     withToken(`/api/fs/download?path=${q(path)}${inline ? "&inline=1" : ""}`),
   transcript: (id: string, offset: number) =>
     request<TranscriptChunk>("GET", `/api/sessions/${q(id)}/transcript?offset=${offset}`),
-  sendText: (id: string, text: string) => request<void>("POST", `/api/sessions/${q(id)}/input`, { text }),
+  sendText: (id: string, text: string, images: string[] = []) =>
+    request<void>("POST", `/api/sessions/${q(id)}/input`, images.length > 0 ? { text, images } : { text }),
+  transcriptImageUrl: (id: string, ref: ImageRef) =>
+    withToken(`/api/sessions/${q(id)}/transcript/image?line=${ref.line}&index=${ref.index}&sub=${ref.sub}`),
+  agents: (id: string, toolUseIds: string[]) =>
+    request<AgentProgress[]>("GET", `/api/sessions/${q(id)}/agents?toolUseIds=${toolUseIds.map(q).join(",")}`),
+  uploadImage: (id: string, file: Blob, name: string) => {
+    const fd = new FormData();
+    fd.append("file", file, name);
+    return request<{ id: string }>("POST", `/api/sessions/${q(id)}/images`, fd);
+  },
   sendKey: (id: string, key: InputKey) => request<void>("POST", `/api/sessions/${q(id)}/input`, { key }),
   sendKeys: (id: string, keys: InputKey[]) => request<void>("POST", `/api/sessions/${q(id)}/input`, { keys }),
   notifications: () => request<Notice[]>("GET", "/api/notifications"),

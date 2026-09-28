@@ -182,6 +182,7 @@ func serve() error {
 			Static:       static,
 			Hosts:        hosts,
 			Transcripts:  launcher.TranscriptPath,
+			UploadDir:    filepath.Join(cfg.DataDir, "uploads"),
 			StartupDelay: 8 * time.Second,
 			Version:      version,
 			Repository:   repository,
