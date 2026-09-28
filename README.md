@@ -10,6 +10,11 @@ A self-hosted web app for running Claude Code from any browser — desktop, phon
 - **Shared across devices**: several browsers can attach to the same session at once. The pty uses the smallest attached viewport.
 - **Resume**: after a stop or a server restart, Claude Code conversations resume with `claude --resume`. The session id is tracked across `/clear`.
 - **Chat view**: read a Claude Code session as a web chat, built from its transcript. Tool calls appear as collapsible cards, and consecutive calls are grouped. You can send prompts, and answer permission prompts with ↑/↓/number/Enter/Esc buttons.
+  - Edit/MultiEdit/Write calls show a diff with line numbers.
+  - Claude's task list (TaskCreate/TaskUpdate, or TodoWrite) is pinned above the chat, together with the shells, monitors and agents running in the background. For agents, their latest tool is shown.
+  - Notifications from background work and `/compact` summaries are shown as such, not as your messages.
+  - Attach images with the clip button or by pasting them. They are sent to Claude Code as image attachments, and images in the conversation appear as thumbnails.
+  - A Stop button (sends Esc) appears while Claude is working.
 - **Home screen**: session cards with live status (working, waiting for a choice, done), quick launch from recent folders, recent notifications, usage, and host health (load, memory, disk, uptime).
 - **Usage**: 5-hour and weekly Claude usage with reset times.
 - **Files**: browse, upload, download, and create folders. Markdown, text, and images can be previewed.
